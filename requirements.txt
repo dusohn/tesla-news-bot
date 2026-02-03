@@ -1,0 +1,4 @@
+feedparser
+requests
+pytz
+Pillow
