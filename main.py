@@ -305,22 +305,37 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
 # -------------------------------
 def _load_font(size: int) -> ImageFont.ImageFont:
     """
-    가능한 경우 시스템 폰트를 사용. 실패하면 기본 폰트.
+    GitHub Actions(Ubuntu) 포함, 한글 표시 가능한 폰트를 우선 로드.
     """
     candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        # ✅ GitHub Actions Ubuntu에서 fonts-noto-cjk 설치 시 흔한 경로들
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/Library/Fonts/AppleGothic.ttf",  # macOS
-        "C:\\Windows\\Fonts\\malgun.ttf",  # Windows
+        "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf",
+
+        # fallback
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+
+        # macOS
+        "/Library/Fonts/AppleGothic.ttf",
+
+        # Windows
+        "C:\\Windows\\Fonts\\malgun.ttf",
         "C:\\Windows\\Fonts\\arial.ttf",
     ]
+
     for p in candidates:
         try:
             if os.path.exists(p):
                 return ImageFont.truetype(p, size=size)
         except Exception:
             pass
+
+    # 최후 fallback (한글 깨질 수 있음)
     return ImageFont.load_default()
+
 
 
 def save_report_png(text: str, date_str: str) -> str:
