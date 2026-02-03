@@ -4,7 +4,7 @@ on:
   schedule:
     # 매일 한국 시간 오전 8시 실행
     # GitHub는 UTC 기준이므로, 한국(UTC+9) 8시는 -> 전날 밤 23시입니다.
-    - cron: '0 23 * * *'
+    - cron: '0 20 * * *'
   workflow_dispatch: # 수동 실행 버튼 추가
 
 jobs:
@@ -26,7 +26,6 @@ jobs:
 
     - name: 봇 실행
       env:
-        #GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         CHAT_ID: ${{ secrets.CHAT_ID }}
