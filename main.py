@@ -330,7 +330,7 @@ def save_report_png(text: str, date_str: str) -> str:
     """
     # 저장 경로
     #downloads = os.path.join(os.path.expanduser("~"), "Downloads")
-    downloads = "C:\Users\dusoh\Downloads\"
+    downloads = "C:/Users/dusoh/Downloads/"
     #if not os.path.isdir(downloads):
     #    # GitHub Actions 같은 환경에서 Downloads가 없을 수 있음 -> 현재 폴더로
     #    downloads = os.getcwd()
