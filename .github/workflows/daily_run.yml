@@ -1,0 +1,33 @@
+name: Daily Tesla News
+
+on:
+  schedule:
+    # 매일 한국 시간 오전 8시 실행
+    # GitHub는 UTC 기준이므로, 한국(UTC+9) 8시는 -> 전날 밤 23시입니다.
+    - cron: '0 23 * * *'
+  workflow_dispatch: # 수동 실행 버튼 추가
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 저장소 코드 가져오기
+      uses: actions/checkout@v3
+
+    - name: 파이썬 설정
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: 라이브러리 설치
+      run: |
+        pip install -r requirements.txt
+
+    - name: 봇 실행
+      env:
+        #GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+      run: python main.py
