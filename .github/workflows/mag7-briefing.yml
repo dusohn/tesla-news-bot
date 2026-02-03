@@ -5,6 +5,7 @@ on:
   schedule:
     # 매일 KST 08:30 = UTC 23:30 (전날)
     - cron: "30 21 * * *"
+    - cron: "30 08 * * *"
 
 permissions:
   contents: read
