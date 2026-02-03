@@ -329,14 +329,12 @@ def save_report_png(text: str, date_str: str) -> str:
     기본 저장 위치: ~/Downloads/YYYY-MM-DD.png
     """
     # 저장 경로
-    #downloads = os.path.join(os.path.expanduser("~"), "Downloads")
-    downloads = "C:/Users/dusoh/Downloads/"
-    #if not os.path.isdir(downloads):
-    #    # GitHub Actions 같은 환경에서 Downloads가 없을 수 있음 -> 현재 폴더로
-    #    downloads = os.getcwd()
+    downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+    if not os.path.isdir(downloads):
+        # GitHub Actions 같은 환경에서 Downloads가 없을 수 있음 -> 현재 폴더로
+        downloads = os.getcwd()
 
-    #out_path = os.path.join(downloads, f"{date_str}.png")
-    out_path = downloads + f"{date_str}.png"
+    out_path = os.path.join(downloads, f"{date_str}.png")
 
     # 이미지 스타일
     W = 1080  # 인스타/모바일 보기 좋은 폭
