@@ -341,6 +341,9 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
 {schema_block}
 
 규칙:
+- headline_translations는 반드시 위 [헤드라인 데이터]에 제공된 H1~H{MAX_PER_TICKER} 중에서만 선택해 번역할 것.
+- 절대로 새로운 기사나 일반적 시장 문장을 만들지 말 것.
+- 각 번역 뒤에 원본 ID를 괄호로 표시할 것. 예: "테슬라 중국 판매 증가 (TSLA H3)"
 - overall.key_takeaways는 정확히 5개.
 - themes는 티커당 1~{MAX_THEMES_PER_TICKER}개(가능하면 2~4개).
 - 각 theme.keywords는 정확히 3개(짧게, 명사형, 중복 피하기).
