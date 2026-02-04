@@ -1,4 +1,5 @@
-feedparser
 requests
 pytz
 Pillow
+beautifulsoup4
+lxml
