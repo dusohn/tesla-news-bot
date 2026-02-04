@@ -473,20 +473,48 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
         mood = (data.get("mood") or "중립").strip()
 
         themes = safe_list(data.get("themes"))
-        translations = safe_list(data.get("headline_translations"))
+        translations_raw = safe_list(data.get("headline_translations"))
         summary_obj = safe_dict(data.get("summary"))
         bullish = safe_list(summary_obj.get("bullish"))
         bearish = safe_list(summary_obj.get("bearish"))
         watchlist = safe_list(summary_obj.get("watchlist"))
 
-        # fallback: 모델 번역이 없으면 원문 헤드라인 대신 "요약용 한글 제목"이 없어서 영문이 나올 수 있음
-        # 여기서는 어쩔 수 없이 원문 제목을 노출하되 라벨을 "헤드라인"으로 처리
-        fallback_is_english = False
-        if not translations:
-            orig = news_blob.get("items", {}).get(t, [])
-            translations = [h.get("title", "").strip() for h in orig if h.get("title", "").strip()]
-            fallback_is_english = True
+        # ✅ 원문(최대 5개) 확보
+        orig_items = news_blob.get("items", {}).get(t, []) or []
+        orig_titles = []
+        for h in orig_items:
+            title = (h.get("title") or "").strip()
+            if title:
+                orig_titles.append(title)
+        orig_titles = orig_titles[:MAX_PER_TICKER]
 
+        # ✅ headline_translations 정규화: (1) dict 형태 지원, (2) str 형태 지원
+        translations: List[str] = []
+        for x in translations_raw:
+            if isinstance(x, dict):
+                ko = (x.get("ko") or "").strip()
+                _id = (x.get("id") or "").strip()
+                if ko:
+                    translations.append(f"{ko} ({_id})" if _id else ko)
+            elif isinstance(x, str) and x.strip():
+                translations.append(x.strip())
+
+        # ✅ 부족분 보충: 번역이 5개 미만이면 원문으로 채워서 5개 보장 (중복 제거)
+        if len(translations) < MAX_PER_TICKER:
+            seen = set(translations)
+            for ot in orig_titles:
+                if len(translations) >= MAX_PER_TICKER:
+                    break
+                if ot not in seen:
+                    translations.append(ot)
+                    seen.add(ot)
+
+        # ✅ 그래도 없으면(해당 티커 뉴스 0개) 그냥 빈 배열 유지
+        translations = translations[:MAX_PER_TICKER]
+
+        # ----------------
+        # 출력 시작
+        # ----------------
         lines.append(f"{emoji} {t} — {name}")
         lines.append(f"시장 분위기: {mood}")
 
@@ -524,9 +552,12 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
                     lines.append(f"• {x.strip()}")
             lines.append("")
 
+        # ✅ 헤드라인 출력: 5개 보장(가능한 경우)
         if translations:
-            headline_label = "📰 주요 헤드라인(번역)" if not fallback_is_english else "📰 주요 헤드라인"
-            lines.append(headline_label)
+            # 번역이 충분히 왔는지/원문으로 채워졌는지 구분해 라벨링하고 싶으면 아래 주석 해제
+            # label = "📰 주요 헤드라인(번역/보충 포함)"
+            label = "📰 주요 헤드라인"
+            lines.append(label)
             for h in translations[:MAX_PER_TICKER]:
                 if isinstance(h, str) and h.strip():
                     lines.append(f"• {h.strip()}")
@@ -534,6 +565,7 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
         lines.append("\n---\n")
 
     return "\n".join(lines).strip()
+
 
 
 # -------------------------------
