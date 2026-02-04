@@ -299,6 +299,59 @@ def _dynamic_schema_block(tickers: List[str], today: str) -> str:
     ]
     return "\n".join(schema_lines)
 
+def translate_headlines_to_korean(ticker: str, pairs: List[tuple]) -> List[str]:
+    """
+    pairs: [(id_str, english_title), ...]
+    return: ["한글번역 (TICKER H#)", ...]  (입력 순서 유지)
+    """
+    if not OPENAI_API_KEY or not pairs:
+        return []
+
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+    lines = "\n".join([f"{hid}: {title}" for hid, title in pairs])
+
+    prompt = f"""
+너는 금융 뉴스 번역가다.
+아래 영어 헤드라인을 한국어로 자연스럽게 번역해라.
+규칙:
+- 출력은 유효한 JSON만.
+- 각 항목은 정확히 "ko" 필드에 번역문, "id" 필드에 원본 ID를 포함.
+- 번역문에는 기업명/티커는 번역하지 말고 원문 표기를 유지해도 된다.
+- 과장/추측 금지, 의미를 바꾸지 말 것.
+
+입력:
+{lines}
+
+출력 스키마:
+{{"items":[{{"id":"{ticker} H1","ko":"번역문"}}]}}
+""".strip()
+
+    body = {
+        "model": OPENAI_MODEL,
+        "input": prompt,
+        "text": {"format": {"type": "json_object"}}
+    }
+
+    try:
+        r = requests.post(OPENAI_URL, headers=headers, json=body, timeout=45)
+        if r.status_code != 200:
+            return []
+        j = r.json()
+        out = _extract_output_text(j).strip()
+        obj = json.loads(out)
+        items = obj.get("items", [])
+        out_lines = []
+        for it in items:
+            if isinstance(it, dict):
+                ko = (it.get("ko") or "").strip()
+                hid = (it.get("id") or "").strip()
+                if ko:
+                    out_lines.append(f"{ko} ({hid})" if hid else ko)
+        return out_lines
+    except Exception:
+        return []
+
 
 def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Dict[str, Any]]:
     print("Analyzing with ChatGPT (OpenAI Responses API) - JSON output...")
@@ -508,7 +561,44 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
                 if len(translations) >= MAX_PER_TICKER:
                     break
                 if ot not in seen:
-                    translations.append(ot)
+                    #===================
+                    # ✅ 부족분 보충: 번역이 5개 미만이면 "부족한 원문을 추가 번역"해서 5개 보장
+                    if len(translations) < MAX_PER_TICKER and orig_titles:
+                        need = MAX_PER_TICKER - len(translations)
+                    
+                        # 이미 번역된 ID(H#)가 있으면 그 번호는 제외(대충 포함 여부 체크)
+                        # translations 안에 "(TICKER H#)"가 들어온다는 가정
+                        used_ids = set()
+                        for tr in translations:
+                            if isinstance(tr, str) and f"({t} H" in tr:
+                                # 예: "... (TSLA H3)"
+                                start = tr.rfind(f"({t} H")
+                                if start != -1:
+                                    used_ids.add(tr[start+1:].split(")")[0].strip())  # "TSLA H3"
+                    
+                        # 부족분 대상: 원문에서 아직 안 쓴 것들(순서 유지)
+                        pairs = []
+                        for idx, ot in enumerate(orig_titles, start=1):
+                            hid = f"{t} H{idx}"
+                            if hid in used_ids:
+                                continue
+                            pairs.append((hid, ot))
+                            if len(pairs) >= need:
+                                break
+                    
+                        # 추가 번역 호출
+                        extra = translate_headlines_to_korean(t, pairs)
+                    
+                        # 혹시 번역 실패하면 원문으로라도 채움
+                        if extra:
+                            for x in extra:
+                                if len(translations) < MAX_PER_TICKER:
+                                    translations.append(x)
+                        else:
+                            for _, ot in pairs:
+                                if len(translations) < MAX_PER_TICKER:
+                                    translations.append(ot)
+                    #===================
                     seen.add(ot)
 
         # ✅ 그래도 없으면(해당 티커 뉴스 0개) 그냥 빈 배열 유지
