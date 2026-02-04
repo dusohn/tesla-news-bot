@@ -283,7 +283,7 @@ def _dynamic_schema_block(tickers: List[str], today: str) -> str:
             '      "themes": [',
             '        {"theme":"AI","keywords":["키워드","키워드","키워드"]}',
             "      ],",
-            f'      "headline_translations": ["한글 번역 (반드시 가능한 한 min(헤드라인수, {MAX_PER_TICKER})개 채우기, ID 포함 예: {t} H1)" ],',
+            f'      "headline_translations": ["한글 번역 (반드시 {t} H1~H{MAX_PER_TICKER}를 가능한 한 모두 포함)" ],',
             '      "summary": {',
             f'        "bullish": ["호재"(최대 {MAX_LINES}개)],',
             f'        "bearish": ["악재"(최대 {MAX_LINES}개)],',
@@ -362,6 +362,8 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
 {schema_block}
 
 규칙 (위반 시 잘못된 출력으로 간주됨):
+- 각 티커에 헤드라인이 N개 있으면 headline_translations는 정확히 min(N, 5)개를 출력해라.
+- 가능한 경우 반드시 (H1, H2, H3, H4, H5) 순서대로 모두 번역해라.
 - headline_translations는 각 티커별로 가능한 한 많이 채워라: 해당 티커에 헤드라인이 N개 있으면 정확히 min(N, 5)개를 출력해라.
 - headline_translations는 반드시 (H1부터) 순서대로 사용해라. 즉, 가능한 경우 H1~H5를 모두 포함해라.
 - headline_translations는 반드시 위 [헤드라인 데이터]의 H1~H{MAX_PER_TICKER} 중에서만 선택해 번역할 것.
