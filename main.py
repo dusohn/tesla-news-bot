@@ -22,12 +22,12 @@ OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
 MAG7 = [
-    {"name": "Apple", "ticker": "AAPL", "emoji": "🍎"},
-    {"name": "Microsoft", "ticker": "MSFT", "emoji": "💻"},
-    {"name": "Amazon", "ticker": "AMZN", "emoji": "📦"},
+   # {"name": "Apple", "ticker": "AAPL", "emoji": "🍎"},
+   # {"name": "Microsoft", "ticker": "MSFT", "emoji": "💻"},
+   # {"name": "Amazon", "ticker": "AMZN", "emoji": "📦"},
     {"name": "Alphabet", "ticker": "GOOGL", "emoji": "🔍"},
-    {"name": "Meta", "ticker": "META", "emoji": "🧠"},
-    {"name": "NVIDIA", "ticker": "NVDA", "emoji": "🤖"},
+   # {"name": "Meta", "ticker": "META", "emoji": "🧠"},
+   # {"name": "NVIDIA", "ticker": "NVDA", "emoji": "🤖"},
     {"name": "Tesla", "ticker": "TSLA", "emoji": "🚗"},
 ]
 
