@@ -357,7 +357,10 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
         "model": OPENAI_MODEL,
         "input": prompt,
         "text": {
-        "format": {"type": "json_object"}
+            "format": {
+                "type": "json_object"
+            }
+        }
     }
 
 
