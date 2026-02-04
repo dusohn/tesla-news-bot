@@ -364,7 +364,7 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
 규칙 (위반 시 잘못된 출력으로 간주됨):
 - headline_translations는 각 티커별로 가능한 한 많이 채워라: 해당 티커에 헤드라인이 N개 있으면 정확히 min(N, 5)개를 출력해라.
 - headline_translations는 반드시 (H1부터) 순서대로 사용해라. 즉, 가능한 경우 H1~H5를 모두 포함해라.
-- headline_translations는 반드시 위 [헤드라인 데이터]의 H1~H{MAX_PER_TICKER} 을 모두 번역할 것.
+- headline_translations는 반드시 위 [헤드라인 데이터]의 H1~H{MAX_PER_TICKER} 중에서만 선택해 번역할 것.
 - 각 번역에는 반드시 원본 ID를 포함할 것. 예: "테슬라 중국 판매 증가 (TSLA H2)"
 - 새로운 기사, 일반적 시장 문장, 과거 뉴스, 추측을 만들지 말 것.
 - 요약(bullish/bearish/watchlist)도 반드시 위 헤드라인에서 직접 추론 가능한 내용만 사용.
