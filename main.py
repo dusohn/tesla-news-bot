@@ -50,18 +50,9 @@ FINVIZ_SLEEP_SEC = 1.0
 # -------------------------------
 # 1) Fetch Finviz headlines (last 24h only)
 # -------------------------------
-def fetch_finviz_news(ticker: str, max_items: int = 40) -> List[Dict[str, str]]:
-    """
-    Finviz quote 페이지의 뉴스 테이블에서 뉴스 수집.
-    """
+def fetch_finviz_news(ticker: str, now_kst: datetime.datetime, max_items: int = 80) -> List[Dict[str, str]]:
     url = f"https://finviz.com/quote.ashx?t={quote(ticker)}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        )
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
 
     r = requests.get(url, headers=headers, timeout=20)
     r.raise_for_status()
@@ -71,24 +62,89 @@ def fetch_finviz_news(ticker: str, max_items: int = 40) -> List[Dict[str, str]]:
     if not table:
         return []
 
+    et = pytz.timezone("US/Eastern")
+    kst = pytz.timezone("Asia/Seoul")
+    now_et = now_kst.astimezone(et)
+
     items: List[Dict[str, str]] = []
-    rows = table.find_all("tr")
-    for row in rows:
+    last_date_et: Optional[datetime.date] = None
+
+    for row in table.find_all("tr"):
         tds = row.find_all("td")
         if len(tds) < 2:
             continue
 
-        dt_txt = tds[0].get_text(" ", strip=True)  # "Today, 6:40 AM" or "Feb-03, 6:40 AM"
+        raw_dt = tds[0].get_text(" ", strip=True)  # 예: "Feb-03-26 08:35AM" 또는 "08:12AM"
         a = tds[1].find("a")
         title = a.get_text(" ", strip=True) if a else tds[1].get_text(" ", strip=True)
+        if not title:
+            continue
 
-        if title:
-            items.append({"title": title, "published": dt_txt})
+        dt_et = _parse_finviz_dt_et(raw_dt, now_et, last_date_et)
+        if dt_et is not None:
+            last_date_et = dt_et.date()
+            dt_kst = dt_et.astimezone(kst)
+            items.append({"title": title, "published": raw_dt, "published_dt_kst": dt_kst.isoformat()})
+        else:
+            # 파싱 실패해도 일단 담아두고(필터에서 빠짐), 디버깅 가능
+            items.append({"title": title, "published": raw_dt, "published_dt_kst": ""})
 
         if len(items) >= max_items:
             break
 
     return items
+
+def _parse_finviz_dt_et(raw: str, now_et: datetime.datetime, last_date_et: Optional[datetime.date]) -> Optional[datetime.datetime]:
+    """
+    Finviz 시간 문자열을 US/Eastern aware datetime으로 파싱.
+    지원 예:
+      - "Feb-03-26 08:35AM"
+      - "Feb-03-26 8:35AM"
+      - "Today 08:35AM"
+      - "08:12AM"  (이 경우 last_date_et 필요)
+    """
+    et = pytz.timezone("US/Eastern")
+    s = (raw or "").strip()
+    if not s:
+        return None
+
+    # "Today 08:35AM"
+    if s.lower().startswith("today"):
+        parts = s.split()
+        if len(parts) >= 2:
+            tstr = parts[-1]
+            for fmt in ("%I:%M%p",):
+                try:
+                    t = datetime.datetime.strptime(tstr, fmt).time()
+                    dt = datetime.datetime(now_et.year, now_et.month, now_et.day, t.hour, t.minute)
+                    return et.localize(dt)
+                except Exception:
+                    pass
+        return None
+
+    # "Feb-03-26 08:35AM"
+    # (Finviz는 보통 이 포맷)
+    for fmt in ("%b-%d-%y %I:%M%p", "%b-%d-%y %I:%M%p"):
+        try:
+            dt = datetime.datetime.strptime(s, fmt)  # naive
+            dt = dt.replace(year=dt.year)  # 그대로
+            return et.localize(dt)
+        except Exception:
+            pass
+
+    # "08:12AM" (시간만)
+    for fmt in ("%I:%M%p",):
+        try:
+            t = datetime.datetime.strptime(s, fmt).time()
+            if last_date_et is None:
+                return None
+            dt = datetime.datetime(last_date_et.year, last_date_et.month, last_date_et.day, t.hour, t.minute)
+            return et.localize(dt)
+        except Exception:
+            pass
+
+    return None
+
 
 
 def _parse_finviz_datetime_to_kst(dt_txt: str, now_kst: datetime.datetime) -> Optional[datetime.datetime]:
@@ -154,14 +210,24 @@ def get_mag7_news(per_ticker: int = MAX_PER_TICKER) -> Dict[str, Any]:
     print("Fetching news (Finviz, last 24h)...")
     kst = pytz.timezone("Asia/Seoul")
     now_kst = datetime.datetime.now(kst)
+    cutoff = now_kst - datetime.timedelta(hours=24)
 
     items: Dict[str, List[Dict[str, str]]] = {}
 
     for c in MAG7:
         ticker = c["ticker"]
         try:
-            raw = fetch_finviz_news(ticker, max_items=60)
-            recent = filter_last_24h(raw, now_kst=now_kst)
+            raw = fetch_finviz_news(ticker, now_kst=now_kst, max_items=120)
+
+            recent = []
+            for it in raw:
+                iso = (it.get("published_dt_kst") or "").strip()
+                if not iso:
+                    continue
+                dt_kst = datetime.datetime.fromisoformat(iso)
+                if dt_kst >= cutoff:
+                    recent.append({"title": it["title"], "published": it["published"]})
+
             items[ticker] = recent[:per_ticker]
             print(f"- {ticker}: {len(items[ticker])} headlines (last 24h)")
         except Exception as e:
@@ -173,6 +239,7 @@ def get_mag7_news(per_ticker: int = MAX_PER_TICKER) -> Dict[str, Any]:
     total = sum(len(v) for v in items.values())
     print(f"Total headlines (last 24h): {total}")
     return {"source": "Finviz (quote page news)", "items": items}
+
 
 
 # -------------------------------
@@ -289,8 +356,10 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
     body = {
         "model": OPENAI_MODEL,
         "input": prompt,
-        "response_format": {"type": "json_object"},
+        "text": {
+        "format": {"type": "json_object"}
     }
+
 
     try:
         r = requests.post(OPENAI_URL, headers=headers, json=body, timeout=75)
@@ -443,29 +512,26 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
 # 4) Save PNG
 # -------------------------------
 def _load_font(size: int) -> ImageFont.ImageFont:
-    """
-    GitHub Actions(Ubuntu) 포함, 한글 표시 가능한 폰트를 우선 로드.
-    """
     candidates = [
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/Library/Fonts/AppleGothic.ttf",
-        "C:\\Windows\\Fonts\\malgun.ttf",
-        "C:\\Windows\\Fonts\\arial.ttf",
     ]
-
     for p in candidates:
         try:
             if os.path.exists(p):
                 return ImageFont.truetype(p, size=size)
         except Exception:
-            pass
+            continue
 
-    return ImageFont.load_default()
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        # 최후의 최후: Pillow 내부 오류 방지
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size=size)
+
 
 
 def save_report_png(text: str, date_str: str) -> str:
@@ -473,8 +539,6 @@ def save_report_png(text: str, date_str: str) -> str:
     card 텍스트를 PNG로 저장.
     GitHub Actions 환경에서는 ~/Downloads가 없을 수 있어 cwd로 저장됨.
     """
-    print("Font title:", getattr(font_title, "path", None))
-    print("Font body:", getattr(font_body, "path", None))
     
     downloads = os.path.join(os.path.expanduser("~"), "Downloads")
     if not os.path.isdir(downloads):
@@ -486,8 +550,14 @@ def save_report_png(text: str, date_str: str) -> str:
     margin = 60
     line_spacing = 10
 
-    font_title = _load_font(42)
-    font_body = _load_font(30)
+
+    try:
+        font_title = _load_font(42)
+        font_body = _load_font(30)
+    except Exception as e:
+        print("❌ font load failed:", e)
+        font_title = ImageFont.load_default()
+        font_body = ImageFont.load_default()
 
     dummy = Image.new("RGB", (W, 100), "white")
     d = ImageDraw.Draw(dummy)
