@@ -1,12 +1,14 @@
-import feedparser
 import requests
 import os
 import datetime
 import pytz
 import sys
 import json
-import textwrap
+import time
 from typing import Dict, List, Any, Optional
+
+from urllib.parse import quote
+from bs4 import BeautifulSoup
 
 # Pillow (PNG 생성)
 from PIL import Image, ImageDraw, ImageFont
@@ -21,13 +23,14 @@ CHAT_ID = (os.environ.get("CHAT_ID") or "").strip()
 OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
+# ✅ 필요에 맞게 주석 해제/조정
 MAG7 = [
-   # {"name": "Apple", "ticker": "AAPL", "emoji": "🍎"},
-   # {"name": "Microsoft", "ticker": "MSFT", "emoji": "💻"},
-   # {"name": "Amazon", "ticker": "AMZN", "emoji": "📦"},
+    {"name": "Apple", "ticker": "AAPL", "emoji": "🍎"},
+    {"name": "Microsoft", "ticker": "MSFT", "emoji": "💻"},
+    {"name": "Amazon", "ticker": "AMZN", "emoji": "📦"},
     {"name": "Alphabet", "ticker": "GOOGL", "emoji": "🔍"},
-   # {"name": "Meta", "ticker": "META", "emoji": "🧠"},
-   # {"name": "NVIDIA", "ticker": "NVDA", "emoji": "🤖"},
+    {"name": "Meta", "ticker": "META", "emoji": "🧠"},
+    {"name": "NVIDIA", "ticker": "NVDA", "emoji": "🤖"},
     {"name": "Tesla", "ticker": "TSLA", "emoji": "🚗"},
 ]
 
@@ -37,37 +40,139 @@ MAX_LINES = 5
 KW_PER_THEME = 3
 MAX_THEMES_PER_TICKER = 5
 
+# Telegram 메시지 길이 제한(4096) 대응
+TELEGRAM_CHUNK_SIZE = 3900
+
+# Finviz 요청 간 딜레이(봇 차단 완화)
+FINVIZ_SLEEP_SEC = 1.0
+
 
 # -------------------------------
-# 1) Fetch RSS headlines
+# 1) Fetch Finviz headlines (last 24h only)
 # -------------------------------
-def fetch_google_news_rss(query: str, max_items: int = 5) -> List[Dict[str, str]]:
-    rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
-    feed = feedparser.parse(rss_url)
+def fetch_finviz_news(ticker: str, max_items: int = 40) -> List[Dict[str, str]]:
+    """
+    Finviz quote 페이지의 뉴스 테이블에서 뉴스 수집.
+    """
+    url = f"https://finviz.com/quote.ashx?t={quote(ticker)}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        )
+    }
 
-    items = []
-    for entry in (feed.entries or [])[:max_items]:
-        title = getattr(entry, "title", "").strip()
-        published = getattr(entry, "published", "").strip()
+    r = requests.get(url, headers=headers, timeout=20)
+    r.raise_for_status()
+
+    soup = BeautifulSoup(r.text, "lxml")
+    table = soup.find("table", class_="news-table")
+    if not table:
+        return []
+
+    items: List[Dict[str, str]] = []
+    rows = table.find_all("tr")
+    for row in rows:
+        tds = row.find_all("td")
+        if len(tds) < 2:
+            continue
+
+        dt_txt = tds[0].get_text(" ", strip=True)  # "Today, 6:40 AM" or "Feb-03, 6:40 AM"
+        a = tds[1].find("a")
+        title = a.get_text(" ", strip=True) if a else tds[1].get_text(" ", strip=True)
+
         if title:
-            items.append({"title": title, "published": published})
+            items.append({"title": title, "published": dt_txt})
+
+        if len(items) >= max_items:
+            break
+
     return items
 
 
+def _parse_finviz_datetime_to_kst(dt_txt: str, now_kst: datetime.datetime) -> Optional[datetime.datetime]:
+    """
+    Finviz 표기 (Today, 6:40 AM) / (Feb-03, 6:40 AM) 등을
+    US/Eastern 기준으로 해석 후 KST datetime으로 변환.
+    """
+    if not dt_txt:
+        return None
+
+    et = pytz.timezone("US/Eastern")
+    kst = pytz.timezone("Asia/Seoul")
+
+    now_et = now_kst.astimezone(et)
+    year = now_et.year
+
+    # Case 1: "Today, 6:40 AM"
+    if dt_txt.lower().startswith("today"):
+        time_part = dt_txt.split(",", 1)[-1].strip()
+        try:
+            t = datetime.datetime.strptime(time_part, "%I:%M %p").time()
+        except Exception:
+            return None
+        dt_et = et.localize(datetime.datetime(year, now_et.month, now_et.day, t.hour, t.minute))
+        return dt_et.astimezone(kst)
+
+    # Case 2: "Feb-03, 6:40 AM" (또는 변형)
+    norm = dt_txt.replace("-", " ").replace(",", "")
+    parts = norm.split()
+    if len(parts) >= 4:
+        try:
+            mon = parts[0]
+            day = int(parts[1])
+            time_str = " ".join(parts[2:4])  # "6:40 AM"
+            t = datetime.datetime.strptime(time_str, "%I:%M %p").time()
+            month_num = datetime.datetime.strptime(mon, "%b").month
+
+            dt_et = et.localize(datetime.datetime(year, month_num, day, t.hour, t.minute))
+
+            # 연말/연초 경계 보정: 미래로 튀면 작년으로
+            if dt_et > now_et + datetime.timedelta(hours=1):
+                dt_et = et.localize(datetime.datetime(year - 1, month_num, day, t.hour, t.minute))
+
+            return dt_et.astimezone(kst)
+        except Exception:
+            return None
+
+    return None
+
+
+def filter_last_24h(items: List[Dict[str, str]], now_kst: datetime.datetime) -> List[Dict[str, str]]:
+    cutoff = now_kst - datetime.timedelta(hours=24)
+    out = []
+    for it in items:
+        pub = (it.get("published") or "").strip()
+        dt_kst = _parse_finviz_datetime_to_kst(pub, now_kst)
+        if dt_kst and dt_kst >= cutoff:
+            out.append(it)
+    return out
+
+
 def get_mag7_news(per_ticker: int = MAX_PER_TICKER) -> Dict[str, Any]:
-    print("Fetching news (Magnificent 7)...")
+    print("Fetching news (Finviz, last 24h)...")
+    kst = pytz.timezone("Asia/Seoul")
+    now_kst = datetime.datetime.now(kst)
+
     items: Dict[str, List[Dict[str, str]]] = {}
 
     for c in MAG7:
         ticker = c["ticker"]
-        q = f"{ticker}%20stock%20news"
-        headlines = fetch_google_news_rss(q, max_items=per_ticker)
-        items[ticker] = headlines
-        print(f"- {ticker}: {len(headlines)} headlines")
+        try:
+            raw = fetch_finviz_news(ticker, max_items=60)
+            recent = filter_last_24h(raw, now_kst=now_kst)
+            items[ticker] = recent[:per_ticker]
+            print(f"- {ticker}: {len(items[ticker])} headlines (last 24h)")
+        except Exception as e:
+            print(f"⚠️ Finviz fetch failed for {ticker}: {e}")
+            items[ticker] = []
+
+        time.sleep(FINVIZ_SLEEP_SEC)
 
     total = sum(len(v) for v in items.values())
-    print(f"Total headlines: {total}")
-    return {"source": "Google News RSS", "items": items}
+    print(f"Total headlines (last 24h): {total}")
+    return {"source": "Finviz (quote page news)", "items": items}
 
 
 # -------------------------------
@@ -82,6 +187,52 @@ def _extract_output_text(res_json: dict) -> str:
     return "\n".join(t.strip() for t in text_parts if t and t.strip()).strip()
 
 
+def _dynamic_schema_block(tickers: List[str], today: str) -> str:
+    """
+    MAG7 리스트가 일부만 켜져 있어도 스키마가 안 깨지게,
+    by_ticker를 '현재 tickers'로만 요구하도록 스키마 텍스트 생성.
+    """
+    # 예시 티커 하나로 템플릿 만들고, 실제 요구는 tickers 전체로
+    exemplar = tickers[0] if tickers else "AAPL"
+    schema_lines = [
+        "{",
+        f'  "date_kst": "{today}",',
+        '  "universe": "Magnificent 7",',
+        '  "overall": {',
+        '    "key_takeaways": ["문장","문장","문장","문장","문장"],',
+        '    "market_mood": {',
+        '      "label": "긍정|중립|부정",',
+        '      "reason": "한 줄 이유"',
+        "    }",
+        "  },",
+        '  "by_ticker": {',
+    ]
+
+    # tickers 각각을 명시적으로 요구(모델이 빠뜨리는 것 방지)
+    for i, t in enumerate(tickers):
+        comma = "," if i < len(tickers) - 1 else ""
+        schema_lines += [
+            f'    "{t}": {{',
+            '      "themes": [',
+            '        {"theme":"AI","keywords":["키워드","키워드","키워드"]}',
+            "      ],",
+            f'      "headline_translations": ["한글 번역"(최대 {MAX_PER_TICKER}개)],',
+            '      "summary": {',
+            f'        "bullish": ["호재"(최대 {MAX_LINES}개)],',
+            f'        "bearish": ["악재"(최대 {MAX_LINES}개)],',
+            f'        "watchlist": ["관전 포인트"(최대 {MAX_LINES}개)]',
+            "      },",
+            '      "mood": "긍정|중립|부정"',
+            f"    }}{comma}",
+        ]
+
+    schema_lines += [
+        "  }",
+        "}",
+    ]
+    return "\n".join(schema_lines)
+
+
 def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Dict[str, Any]]:
     print("Analyzing with ChatGPT (OpenAI Responses API) - JSON output...")
 
@@ -90,6 +241,8 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
         return None
 
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+    tickers = [c["ticker"] for c in MAG7]
 
     compact_lines = []
     for c in MAG7:
@@ -106,10 +259,11 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
     headlines_text = "\n".join(compact_lines).strip()
 
     theme_list = ", ".join(THEMES)
+    schema_block = _dynamic_schema_block(tickers=tickers, today=today)
 
     prompt = f"""
 너는 미국 주식 시장 뉴스 애널리스트야.
-아래는 오늘 수집된 Magnificent 7(AAPL, MSFT, AMZN, GOOGL, META, NVDA, TSLA) 헤드라인이다.
+아래는 오늘(최근 24시간 이내) 수집된 헤드라인이다.
 
 반드시 '유효한 JSON만' 출력해. (마크다운/코드블록/설명 문장 금지)
 
@@ -117,37 +271,7 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
 [{theme_list}]
 
 스키마(반드시 준수):
-{{
-  "date_kst": "{today}",
-  "universe": "Magnificent 7",
-  "overall": {{
-    "key_takeaways": ["문장","문장","문장","문장","문장"],
-    "market_mood": {{
-      "label": "긍정|중립|부정",
-      "reason": "한 줄 이유"
-    }}
-  }},
-  "by_ticker": {{
-    "AAPL": {{
-      "themes": [
-        {{"theme":"AI","keywords":["키워드","키워드","키워드"]}}
-      ],
-      "headline_translations": ["한글 번역"(최대 {MAX_PER_TICKER}개)],
-      "summary": {{
-        "bullish": ["호재"(최대 {MAX_LINES}개)],
-        "bearish": ["악재"(최대 {MAX_LINES}개)],
-        "watchlist": ["관전 포인트"(최대 {MAX_LINES}개)]
-      }},
-      "mood": "긍정|중립|부정"
-    }},
-    "MSFT": {{ "...동일..." }},
-    "AMZN": {{ "...동일..." }},
-    "GOOGL": {{ "...동일..." }},
-    "META": {{ "...동일..." }},
-    "NVDA": {{ "...동일..." }},
-    "TSLA": {{ "...동일..." }}
-  }}
-}}
+{schema_block}
 
 규칙:
 - overall.key_takeaways는 정확히 5개.
@@ -161,10 +285,20 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
 {headlines_text}
 """.strip()
 
-    body = {"model": OPENAI_MODEL, "input": prompt}
+    # Responses API: 가능하면 json_object 강제(모델/계정에 따라 미지원일 수 있어 fallback 포함)
+    body = {
+        "model": OPENAI_MODEL,
+        "input": prompt,
+        "response_format": {"type": "json_object"},
+    }
 
     try:
         r = requests.post(OPENAI_URL, headers=headers, json=body, timeout=75)
+        if r.status_code != 200:
+            # json_object 미지원 등일 수 있어 fallback으로 재시도
+            print(f"⚠️ OpenAI API non-200 (try fallback) {r.status_code}: {r.text[:300]}")
+            body.pop("response_format", None)
+            r = requests.post(OPENAI_URL, headers=headers, json=body, timeout=75)
     except requests.RequestException as e:
         print(f"❌ OpenAI request failed: {e}")
         return None
@@ -218,7 +352,7 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
     overall_reason = (market_mood.get("reason") or "").strip()
 
     lines: List[str] = []
-    lines.append("🧠 [미국주식 Magnificent 7 데일리 브리핑]")
+    lines.append("🧠 [미국주식 데일리 브리핑 (Finviz / 최근 24시간)]")
     if date_kst:
         lines.append(f"📅 {date_kst}")
     lines.append("")
@@ -248,9 +382,13 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
         bearish = safe_list(summary_obj.get("bearish"))
         watchlist = safe_list(summary_obj.get("watchlist"))
 
+        # fallback: 모델 번역이 없으면 원문 헤드라인 대신 "요약용 한글 제목"이 없어서 영문이 나올 수 있음
+        # 여기서는 어쩔 수 없이 원문 제목을 노출하되 라벨을 "헤드라인"으로 처리
+        fallback_is_english = False
         if not translations:
             orig = news_blob.get("items", {}).get(t, [])
             translations = [h.get("title", "").strip() for h in orig if h.get("title", "").strip()]
+            fallback_is_english = True
 
         lines.append(f"{emoji} {t} — {name}")
         lines.append(f"시장 분위기: {mood}")
@@ -272,26 +410,27 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
         lines.append("")
         if bullish:
             lines.append("✅ 호재")
-            for x in bullish[:5]:
+            for x in bullish[:MAX_LINES]:
                 if isinstance(x, str) and x.strip():
                     lines.append(f"• {x.strip()}")
             lines.append("")
         if bearish:
             lines.append("⚠️ 악재")
-            for x in bearish[:5]:
+            for x in bearish[:MAX_LINES]:
                 if isinstance(x, str) and x.strip():
                     lines.append(f"• {x.strip()}")
             lines.append("")
         if watchlist:
             lines.append("👀 관전 포인트")
-            for x in watchlist[:5]:
+            for x in watchlist[:MAX_LINES]:
                 if isinstance(x, str) and x.strip():
                     lines.append(f"• {x.strip()}")
             lines.append("")
 
         if translations:
-            lines.append("📰 주요 헤드라인(번역)")
-            for h in translations[:5]:
+            headline_label = "📰 주요 헤드라인(번역)" if not fallback_is_english else "📰 주요 헤드라인"
+            lines.append(headline_label)
+            for h in translations[:MAX_PER_TICKER]:
                 if isinstance(h, str) and h.strip():
                     lines.append(f"• {h.strip()}")
 
@@ -301,27 +440,20 @@ def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str
 
 
 # -------------------------------
-# 4) Save PNG to Downloads
+# 4) Save PNG
 # -------------------------------
 def _load_font(size: int) -> ImageFont.ImageFont:
     """
     GitHub Actions(Ubuntu) 포함, 한글 표시 가능한 폰트를 우선 로드.
     """
     candidates = [
-        # ✅ GitHub Actions Ubuntu에서 fonts-noto-cjk 설치 시 흔한 경로들
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJKkr-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf",
-
-        # fallback
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-
-        # macOS
         "/Library/Fonts/AppleGothic.ttf",
-
-        # Windows
         "C:\\Windows\\Fonts\\malgun.ttf",
         "C:\\Windows\\Fonts\\arial.ttf",
     ]
@@ -333,47 +465,44 @@ def _load_font(size: int) -> ImageFont.ImageFont:
         except Exception:
             pass
 
-    # 최후 fallback (한글 깨질 수 있음)
     return ImageFont.load_default()
-
 
 
 def save_report_png(text: str, date_str: str) -> str:
     """
     card 텍스트를 PNG로 저장.
-    기본 저장 위치: ~/Downloads/YYYY-MM-DD.png
+    GitHub Actions 환경에서는 ~/Downloads가 없을 수 있어 cwd로 저장됨.
     """
-    # 저장 경로
     downloads = os.path.join(os.path.expanduser("~"), "Downloads")
     if not os.path.isdir(downloads):
-        # GitHub Actions 같은 환경에서 Downloads가 없을 수 있음 -> 현재 폴더로
         downloads = os.getcwd()
 
     out_path = os.path.join(downloads, f"{date_str}.png")
 
-    # 이미지 스타일
-    W = 1080  # 인스타/모바일 보기 좋은 폭
+    W = 1080
     margin = 60
     line_spacing = 10
 
     font_title = _load_font(42)
     font_body = _load_font(30)
 
-    # 텍스트 wrapping: 폭에 맞춰 줄바꿈
-    # (폰트 폭은 draw.textlength로 측정)
     dummy = Image.new("RGB", (W, 100), "white")
     d = ImageDraw.Draw(dummy)
 
     def wrap_line(line: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
         if not line.strip():
             return [""]
-        words = list(line)
-        # 한글/이모지 대비: "글자 단위"로 폭을 맞추는 방식(안전)
+        chars = list(line)
         out = []
         cur = ""
-        for ch in words:
+        for ch in chars:
             test = cur + ch
-            if d.textlength(test, font=font) <= max_width:
+            try:
+                ok = d.textlength(test, font=font) <= max_width
+            except Exception:
+                # 일부 환경에서 이모지/폰트 문제 시 대략적인 fallback
+                ok = len(test) * (font.size * 0.6) <= max_width
+            if ok:
                 cur = test
             else:
                 out.append(cur)
@@ -386,7 +515,6 @@ def save_report_png(text: str, date_str: str) -> str:
 
     wrapped: List[tuple] = []
     for i, ln in enumerate(lines_raw):
-        # 첫 줄은 제목 느낌으로 크게
         if i == 0:
             for wln in wrap_line(ln, font_title, max_text_width):
                 wrapped.append(("title", wln))
@@ -394,7 +522,6 @@ def save_report_png(text: str, date_str: str) -> str:
             for wln in wrap_line(ln, font_body, max_text_width):
                 wrapped.append(("body", wln))
 
-    # 높이 계산
     y = margin
     for kind, ln in wrapped:
         font = font_title if kind == "title" else font_body
@@ -403,15 +530,13 @@ def save_report_png(text: str, date_str: str) -> str:
         y += h + line_spacing
     H = y + margin
 
-    # 이미지 생성
     img = Image.new("RGB", (W, H), (255, 255, 255))
     draw = ImageDraw.Draw(img)
 
     y = margin
     for kind, ln in wrapped:
         font = font_title if kind == "title" else font_body
-        fill = (0, 0, 0)
-        draw.text((margin, y), ln, font=font, fill=fill)
+        draw.text((margin, y), ln, font=font, fill=(0, 0, 0))
         bbox = draw.textbbox((margin, y), ln, font=font)
         h = (bbox[3] - bbox[1]) if bbox else (50 if kind == "title" else 36)
         y += h + line_spacing
@@ -421,7 +546,7 @@ def save_report_png(text: str, date_str: str) -> str:
 
 
 # -------------------------------
-# 5) Telegram
+# 5) Telegram (chunked)
 # -------------------------------
 def send_telegram_msg(message: str) -> bool:
     print("Sending Telegram...")
@@ -430,12 +555,14 @@ def send_telegram_msg(message: str) -> bool:
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "disable_web_page_preview": True}
 
-    resp = requests.post(url, data=payload, timeout=20)
-    if resp.status_code != 200:
-        print(f"❌ Telegram send failed: {resp.text}")
-        return False
+    chunks = [message[i:i + TELEGRAM_CHUNK_SIZE] for i in range(0, len(message), TELEGRAM_CHUNK_SIZE)]
+    for idx, chunk in enumerate(chunks, start=1):
+        payload = {"chat_id": CHAT_ID, "text": chunk, "disable_web_page_preview": True}
+        resp = requests.post(url, data=payload, timeout=20)
+        if resp.status_code != 200:
+            print(f"❌ Telegram send failed (part {idx}/{len(chunks)}): {resp.text}")
+            return False
 
     print("✅ Telegram sent")
     return True
@@ -480,7 +607,7 @@ def main():
     # 2) Telegram 전송
     ok_tg = send_telegram_msg(report_text)
 
-    # 3) PNG 저장 (다운로드 폴더 / 파일명 = 날짜.png)
+    # 3) PNG 저장
     try:
         out_path = save_report_png(report_text, today)
         print(f"✅ Saved PNG: {out_path}")
