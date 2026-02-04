@@ -283,7 +283,7 @@ def _dynamic_schema_block(tickers: List[str], today: str) -> str:
             '      "themes": [',
             '        {"theme":"AI","keywords":["키워드","키워드","키워드"]}',
             "      ],",
-            f'      "headline_translations": ["한글 번역"(최대 {MAX_PER_TICKER}개)],',
+            f'      "headline_translations": ["한글 번역 (반드시 가능한 한 min(헤드라인수, {MAX_PER_TICKER})개 채우기, ID 포함 예: {t} H1)" ],',
             '      "summary": {',
             f'        "bullish": ["호재"(최대 {MAX_LINES}개)],',
             f'        "bearish": ["악재"(최대 {MAX_LINES}개)],',
