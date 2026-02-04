@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
   schedule:
     # 매일 KST 08:30 = UTC 23:30 (전날)
-    - cron: "30 21 * * *"
-    - cron: "30 10 * * *"
+    - cron: "00 23 * * *"
+    - cron: "30 11 * * *"
 
 permissions:
   contents: read
