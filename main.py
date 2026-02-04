@@ -473,6 +473,9 @@ def save_report_png(text: str, date_str: str) -> str:
     card 텍스트를 PNG로 저장.
     GitHub Actions 환경에서는 ~/Downloads가 없을 수 있어 cwd로 저장됨.
     """
+    print("Font title:", getattr(font_title, "path", None))
+    print("Font body:", getattr(font_body, "path", None))
+    
     downloads = os.path.join(os.path.expanduser("~"), "Downloads")
     if not os.path.isdir(downloads):
         downloads = os.getcwd()
