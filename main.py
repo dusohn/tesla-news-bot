@@ -307,55 +307,74 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
         print("❌ OPENAI_API_KEY missing")
         return None
 
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_API_KEY}"}
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
 
+    # ---------------------------------------
+    # 1) Headline block with strict IDs
+    # ---------------------------------------
     tickers = [c["ticker"] for c in MAG7]
 
     compact_lines = []
     for c in MAG7:
         t = c["ticker"]
-        name = c["name"]
         headlines = news_blob["items"].get(t, [])
         for i, h in enumerate(headlines, start=1):
-            title = h.get("title", "")
-            published = h.get("published", "")
+            title = (h.get("title") or "").strip()
+            published = (h.get("published") or "").strip()
+            if not title:
+                continue
             if published:
-                compact_lines.append(f"{t} ({name}) H{i}: {title} [{published}]")
+                compact_lines.append(f"{t} H{i}: {title} [{published}]")
             else:
-                compact_lines.append(f"{t} ({name}) H{i}: {title}")
+                compact_lines.append(f"{t} H{i}: {title}")
+
     headlines_text = "\n".join(compact_lines).strip()
 
-    theme_list = ", ".join(THEMES)
+    # ---------------------------------------
+    # 2) Dynamic JSON schema
+    # ---------------------------------------
     schema_block = _dynamic_schema_block(tickers=tickers, today=today)
+    theme_list = ", ".join(THEMES)
 
+    # ---------------------------------------
+    # 3) Strict hallucination-proof prompt
+    # ---------------------------------------
     prompt = f"""
-너는 미국 주식 시장 뉴스 애널리스트야.
-아래는 오늘(최근 24시간 이내) 수집된 헤드라인이다.
+너는 미국 주식 시장 뉴스 애널리스트다.
+아래는 Finviz에서 수집한 '최근 24시간 이내' 실제 헤드라인이다.
 
-반드시 '유효한 JSON만' 출력해. (마크다운/코드블록/설명 문장 금지)
+⚠️ 이 데이터만이 유일한 정보원이다.
+⚠️ 아래에 없는 기사, 내용, 추측, 일반론, 배경지식은 절대 사용하지 마라.
+
+[헤드라인 데이터 — ID로만 참조할 것]
+{headlines_text}
 
 테마는 반드시 아래 목록 중에서만 선택해:
 [{theme_list}]
 
-스키마(반드시 준수):
+반드시 아래 JSON 스키마를 100% 준수해.
+다른 텍스트, 설명, 마크다운, 코드블록은 절대 출력하지 마라.
+
+스키마:
 {schema_block}
 
-규칙:
-- headline_translations는 반드시 위 [헤드라인 데이터]에 제공된 H1~H{MAX_PER_TICKER} 중에서만 선택해 번역할 것.
-- 절대로 새로운 기사나 일반적 시장 문장을 만들지 말 것.
-- 각 번역 뒤에 원본 ID를 괄호로 표시할 것. 예: "테슬라 중국 판매 증가 (TSLA H3)"
-- overall.key_takeaways는 정확히 5개.
-- themes는 티커당 1~{MAX_THEMES_PER_TICKER}개(가능하면 2~4개).
-- 각 theme.keywords는 정확히 3개(짧게, 명사형, 중복 피하기).
-- headline_translations 최대 {MAX_PER_TICKER}개.
-- bullish/bearish/watchlist 각 최대 {MAX_LINES}개(없으면 빈 배열 가능).
-- 전부 한국어(영어/URL 금지), 한 줄 문장으로 짧게.
+규칙 (위반 시 잘못된 출력으로 간주됨):
+- headline_translations는 반드시 위 [헤드라인 데이터]의 H1~H{MAX_PER_TICKER} 중에서만 선택해 번역할 것.
+- 각 번역에는 반드시 원본 ID를 포함할 것. 예: "테슬라 중국 판매 증가 (TSLA H2)"
+- 새로운 기사, 일반적 시장 문장, 과거 뉴스, 추측을 만들지 말 것.
+- 요약(bullish/bearish/watchlist)도 반드시 위 헤드라인에서 직접 추론 가능한 내용만 사용.
+- 헤드라인이 없는 티커는 모든 배열을 빈 배열 [] 로 두어라.
+- 전부 한국어로 작성.
 
-[헤드라인 데이터]
-{headlines_text}
+지금 바로 JSON만 출력하라.
 """.strip()
 
-    # Responses API: 가능하면 json_object 강제(모델/계정에 따라 미지원일 수 있어 fallback 포함)
+    # ---------------------------------------
+    # 4) OpenAI Responses API (JSON mode)
+    # ---------------------------------------
     body = {
         "model": OPENAI_MODEL,
         "input": prompt,
@@ -366,14 +385,8 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
         }
     }
 
-
     try:
         r = requests.post(OPENAI_URL, headers=headers, json=body, timeout=75)
-        if r.status_code != 200:
-            # json_object 미지원 등일 수 있어 fallback으로 재시도
-            print(f"⚠️ OpenAI API non-200 (try fallback) {r.status_code}: {r.text[:300]}")
-            body.pop("response_format", None)
-            r = requests.post(OPENAI_URL, headers=headers, json=body, timeout=75)
     except requests.RequestException as e:
         print(f"❌ OpenAI request failed: {e}")
         return None
@@ -388,14 +401,18 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
         print("❌ OpenAI response not JSON (outer)")
         return None
 
+    # ---------------------------------------
+    # 5) Extract & parse JSON-only output
+    # ---------------------------------------
     out_text = _extract_output_text(j).strip()
     if not out_text:
+        print("❌ Empty model output")
         return None
 
     try:
         return json.loads(out_text)
     except json.JSONDecodeError:
-        # tolerate stray text
+        # tolerate stray text just in case
         start = out_text.find("{")
         end = out_text.rfind("}")
         if start != -1 and end != -1 and end > start:
@@ -403,8 +420,11 @@ def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Di
                 return json.loads(out_text[start:end + 1])
             except Exception:
                 pass
+
         print("❌ Failed to parse JSON from model output.")
+        print(out_text[:500])
         return None
+
 
 
 # -------------------------------
