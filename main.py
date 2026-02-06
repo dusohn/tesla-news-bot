@@ -373,6 +373,14 @@ def send_telegram_msg(message: str) -> bool:
     print("✅ Telegram sent")
     return True
 
+def decide_summary_lines(ticker: str, n_headlines: int) -> int:
+    """
+    기본: TSLA=20줄, 나머지=10줄.
+    단, 기사 수가 적으면 5줄로 축소.
+    """
+    base = 20 if ticker == "TSLA" else 10
+    # "기사 수가 적으면" 기준: 최근 24시간 유효 헤드라인이 5개 이하이면 5줄
+    return 5 if n_headlines <= 5 else base
 
 # -------------------------------
 # Report builder
@@ -414,7 +422,7 @@ def build_report_text(today: str) -> str:
         deduped, earnings_mode = filter_earnings_only_if_earnings_day(deduped_all)
     
         # 5) 기사 수가 적으면 5줄, 아니면 기본(TSLA 20 / others 10)
-        #n_lines = decide_summary_lines(t, n_headlines=len(deduped))
+        n_lines = decide_summary_lines(t, n_headlines=len(deduped))
     
         # 6) 요약
         summary = summarize_ticker_lines_from_headlines(
