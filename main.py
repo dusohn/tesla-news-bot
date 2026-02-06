@@ -1,17 +1,15 @@
-import requests
-import os
-import datetime
-import pytz
+-import os
 import sys
+import re
 import json
 import time
-from typing import Dict, List, Any, Optional
-
+import datetime
+from typing import Dict, List, Any, Optional, Tuple
 from urllib.parse import quote
-from bs4 import BeautifulSoup
 
-# Pillow (PNG 생성)
-from PIL import Image, ImageDraw, ImageFont
+import requests
+import pytz
+from bs4 import BeautifulSoup
 
 # -------------------------------
 # Environment Variables
@@ -23,7 +21,12 @@ CHAT_ID = (os.environ.get("CHAT_ID") or "").strip()
 OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
-# ✅ 필요에 맞게 주석 해제/조정
+# Telegram message hard limit is 4096
+TELEGRAM_CHUNK_SIZE = 3800
+
+# Finviz anti-bot softening
+FINVIZ_SLEEP_SEC = 1.0
+
 MAG7 = [
     {"name": "Apple", "ticker": "AAPL", "emoji": "🍎"},
     {"name": "Microsoft", "ticker": "MSFT", "emoji": "💻"},
@@ -34,25 +37,90 @@ MAG7 = [
     {"name": "Tesla", "ticker": "TSLA", "emoji": "🚗"},
 ]
 
-THEMES = ["AI", "로봇", "광고", "클라우드", "반도체", "전기차", "로보택시", "실적", "규제", "거시"]
-MAX_PER_TICKER = 5
-MAX_LINES = 5
-KW_PER_THEME = 3
-MAX_THEMES_PER_TICKER = 5
 
-# Telegram 메시지 길이 제한(4096) 대응
-TELEGRAM_CHUNK_SIZE = 3900
-
-# Finviz 요청 간 딜레이(봇 차단 완화)
-FINVIZ_SLEEP_SEC = 1.0
+# -------------------------------
+# OpenAI Responses API helpers
+# -------------------------------
+def _extract_output_text(res_json: dict) -> str:
+    """
+    Responses API 응답에서 output_text만 합쳐 추출
+    """
+    text_parts = []
+    for item in (res_json.get("output") or []):
+        for c in (item.get("content") or []):
+            if c.get("type") == "output_text" and isinstance(c.get("text"), str):
+                text_parts.append(c["text"])
+    return "\n".join(t.strip() for t in text_parts if t and t.strip()).strip()
 
 
 # -------------------------------
-# 1) Fetch Finviz headlines (last 24h only)
+# Finviz time parsing (ET -> KST filtering)
 # -------------------------------
-def fetch_finviz_news(ticker: str, now_kst: datetime.datetime, max_items: int = 80) -> List[Dict[str, str]]:
+def _parse_finviz_dt_et(raw: str, now_et: datetime.datetime, last_date_et: Optional[datetime.date]) -> Optional[datetime.datetime]:
+    """
+    Finviz 뉴스 테이블의 시간 문자열을 US/Eastern aware datetime으로 파싱.
+    지원 예:
+      - "Feb-03-26 08:35AM"
+      - "Today 08:35AM"
+      - "08:12AM" (이 경우 last_date_et 필요)
+    """
+    et = pytz.timezone("US/Eastern")
+    s = (raw or "").strip()
+    if not s:
+        return None
+
+    # Today 08:35AM
+    if s.lower().startswith("today"):
+        parts = s.split()
+        if len(parts) >= 2:
+            tstr = parts[-1]
+            try:
+                t = datetime.datetime.strptime(tstr, "%I:%M%p").time()
+                return et.localize(datetime.datetime(now_et.year, now_et.month, now_et.day, t.hour, t.minute))
+            except Exception:
+                return None
+        return None
+
+    # "Feb-03-26 08:35AM"
+    try:
+        dt = datetime.datetime.strptime(s, "%b-%d-%y %I:%M%p")
+        return et.localize(dt)
+    except Exception:
+        pass
+
+    # "08:12AM" (time only)
+    try:
+        t = datetime.datetime.strptime(s, "%I:%M%p").time()
+        if last_date_et is None:
+            return None
+        return et.localize(datetime.datetime(last_date_et.year, last_date_et.month, last_date_et.day, t.hour, t.minute))
+    except Exception:
+        return None
+
+
+def _norm_title(s: str) -> str:
+    """
+    중복 기사 병합용 타이틀 정규화
+    """
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    s = re.sub(r"[’‘´`]", "'", s)
+    s = re.sub(r"[^a-z0-9가-힣\s'\-:,.!?()/%&]", "", s)
+    return s
+
+
+def fetch_finviz_news_with_links_24h(ticker: str, max_items: int = 120) -> List[Dict[str, str]]:
+    """
+    Finviz quote 페이지 뉴스 테이블에서 title/url/published를 수집하고,
+    최근 24시간(KST 기준)만 남긴 리스트 반환.
+    """
     url = f"https://finviz.com/quote.ashx?t={quote(ticker)}"
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+    }
 
     r = requests.get(url, headers=headers, timeout=20)
     r.raise_for_status()
@@ -62,9 +130,12 @@ def fetch_finviz_news(ticker: str, now_kst: datetime.datetime, max_items: int = 
     if not table:
         return []
 
-    et = pytz.timezone("US/Eastern")
     kst = pytz.timezone("Asia/Seoul")
+    et = pytz.timezone("US/Eastern")
+
+    now_kst = datetime.datetime.now(kst)
     now_et = now_kst.astimezone(et)
+    cutoff_kst = now_kst - datetime.timedelta(hours=24)
 
     items: List[Dict[str, str]] = []
     last_date_et: Optional[datetime.date] = None
@@ -74,704 +145,132 @@ def fetch_finviz_news(ticker: str, now_kst: datetime.datetime, max_items: int = 
         if len(tds) < 2:
             continue
 
-        raw_dt = tds[0].get_text(" ", strip=True)  # 예: "Feb-03-26 08:35AM" 또는 "08:12AM"
+        raw_dt = tds[0].get_text(" ", strip=True)  # "Feb-03-26 08:35AM" or "08:12AM"
         a = tds[1].find("a")
         title = a.get_text(" ", strip=True) if a else tds[1].get_text(" ", strip=True)
+        link = (a.get("href", "").strip() if a else "")
+
         if not title:
             continue
 
         dt_et = _parse_finviz_dt_et(raw_dt, now_et, last_date_et)
-        if dt_et is not None:
-            last_date_et = dt_et.date()
-            dt_kst = dt_et.astimezone(kst)
-            items.append({"title": title, "published": raw_dt, "published_dt_kst": dt_kst.isoformat()})
-        else:
-            # 파싱 실패해도 일단 담아두고(필터에서 빠짐), 디버깅 가능
-            items.append({"title": title, "published": raw_dt, "published_dt_kst": ""})
+        if dt_et is None:
+            continue
+
+        last_date_et = dt_et.date()
+        dt_kst = dt_et.astimezone(kst)
+
+        if dt_kst < cutoff_kst:
+            continue
+
+        items.append(
+            {
+                "title": title,
+                "url": link,
+                "published": raw_dt,
+                "published_kst": dt_kst.isoformat(),
+            }
+        )
 
         if len(items) >= max_items:
             break
 
     return items
 
-def _parse_finviz_dt_et(raw: str, now_et: datetime.datetime, last_date_et: Optional[datetime.date]) -> Optional[datetime.datetime]:
+
+def dedupe_news(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """
-    Finviz 시간 문자열을 US/Eastern aware datetime으로 파싱.
-    지원 예:
-      - "Feb-03-26 08:35AM"
-      - "Feb-03-26 8:35AM"
-      - "Today 08:35AM"
-      - "08:12AM"  (이 경우 last_date_et 필요)
+    제목 기반 중복 병합
     """
-    et = pytz.timezone("US/Eastern")
-    s = (raw or "").strip()
-    if not s:
-        return None
-
-    # "Today 08:35AM"
-    if s.lower().startswith("today"):
-        parts = s.split()
-        if len(parts) >= 2:
-            tstr = parts[-1]
-            for fmt in ("%I:%M%p",):
-                try:
-                    t = datetime.datetime.strptime(tstr, fmt).time()
-                    dt = datetime.datetime(now_et.year, now_et.month, now_et.day, t.hour, t.minute)
-                    return et.localize(dt)
-                except Exception:
-                    pass
-        return None
-
-    # "Feb-03-26 08:35AM"
-    # (Finviz는 보통 이 포맷)
-    for fmt in ("%b-%d-%y %I:%M%p", "%b-%d-%y %I:%M%p"):
-        try:
-            dt = datetime.datetime.strptime(s, fmt)  # naive
-            dt = dt.replace(year=dt.year)  # 그대로
-            return et.localize(dt)
-        except Exception:
-            pass
-
-    # "08:12AM" (시간만)
-    for fmt in ("%I:%M%p",):
-        try:
-            t = datetime.datetime.strptime(s, fmt).time()
-            if last_date_et is None:
-                return None
-            dt = datetime.datetime(last_date_et.year, last_date_et.month, last_date_et.day, t.hour, t.minute)
-            return et.localize(dt)
-        except Exception:
-            pass
-
-    return None
-
-
-
-def _parse_finviz_datetime_to_kst(dt_txt: str, now_kst: datetime.datetime) -> Optional[datetime.datetime]:
-    """
-    Finviz 표기 (Today, 6:40 AM) / (Feb-03, 6:40 AM) 등을
-    US/Eastern 기준으로 해석 후 KST datetime으로 변환.
-    """
-    if not dt_txt:
-        return None
-
-    et = pytz.timezone("US/Eastern")
-    kst = pytz.timezone("Asia/Seoul")
-
-    now_et = now_kst.astimezone(et)
-    year = now_et.year
-
-    # Case 1: "Today, 6:40 AM"
-    if dt_txt.lower().startswith("today"):
-        time_part = dt_txt.split(",", 1)[-1].strip()
-        try:
-            t = datetime.datetime.strptime(time_part, "%I:%M %p").time()
-        except Exception:
-            return None
-        dt_et = et.localize(datetime.datetime(year, now_et.month, now_et.day, t.hour, t.minute))
-        return dt_et.astimezone(kst)
-
-    # Case 2: "Feb-03, 6:40 AM" (또는 변형)
-    norm = dt_txt.replace("-", " ").replace(",", "")
-    parts = norm.split()
-    if len(parts) >= 4:
-        try:
-            mon = parts[0]
-            day = int(parts[1])
-            time_str = " ".join(parts[2:4])  # "6:40 AM"
-            t = datetime.datetime.strptime(time_str, "%I:%M %p").time()
-            month_num = datetime.datetime.strptime(mon, "%b").month
-
-            dt_et = et.localize(datetime.datetime(year, month_num, day, t.hour, t.minute))
-
-            # 연말/연초 경계 보정: 미래로 튀면 작년으로
-            if dt_et > now_et + datetime.timedelta(hours=1):
-                dt_et = et.localize(datetime.datetime(year - 1, month_num, day, t.hour, t.minute))
-
-            return dt_et.astimezone(kst)
-        except Exception:
-            return None
-
-    return None
-
-
-def filter_last_24h(items: List[Dict[str, str]], now_kst: datetime.datetime) -> List[Dict[str, str]]:
-    cutoff = now_kst - datetime.timedelta(hours=24)
-    out = []
+    out: List[Dict[str, str]] = []
+    seen = set()
     for it in items:
-        pub = (it.get("published") or "").strip()
-        dt_kst = _parse_finviz_datetime_to_kst(pub, now_kst)
-        if dt_kst and dt_kst >= cutoff:
-            out.append(it)
+        key = _norm_title(it.get("title", ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
     return out
 
 
-def get_mag7_news(per_ticker: int = MAX_PER_TICKER) -> Dict[str, Any]:
-    print("Fetching news (Finviz, last 24h)...")
-    kst = pytz.timezone("Asia/Seoul")
-    now_kst = datetime.datetime.now(kst)
-    cutoff = now_kst - datetime.timedelta(hours=24)
-
-    items: Dict[str, List[Dict[str, str]]] = {}
-
-    for c in MAG7:
-        ticker = c["ticker"]
-        try:
-            raw = fetch_finviz_news(ticker, now_kst=now_kst, max_items=120)
-
-            recent = []
-            for it in raw:
-                iso = (it.get("published_dt_kst") or "").strip()
-                if not iso:
-                    continue
-                dt_kst = datetime.datetime.fromisoformat(iso)
-                if dt_kst >= cutoff:
-                    recent.append({"title": it["title"], "published": it["published"]})
-
-            items[ticker] = recent[:per_ticker]
-            print(f"- {ticker}: {len(items[ticker])} headlines (last 24h)")
-        except Exception as e:
-            print(f"⚠️ Finviz fetch failed for {ticker}: {e}")
-            items[ticker] = []
-
-        time.sleep(FINVIZ_SLEEP_SEC)
-
-    total = sum(len(v) for v in items.values())
-    print(f"Total headlines (last 24h): {total}")
-    return {"source": "Finviz (quote page news)", "items": items}
-
-
-
 # -------------------------------
-# 2) OpenAI JSON summarization (with themes)
+# Summarization: 10 lines (+ TSLA 20) from Finviz headlines only
 # -------------------------------
-def _extract_output_text(res_json: dict) -> str:
-    text_parts = []
-    for item in (res_json.get("output") or []):
-        for c in (item.get("content") or []):
-            if c.get("type") == "output_text" and isinstance(c.get("text"), str):
-                text_parts.append(c["text"])
-    return "\n".join(t.strip() for t in text_parts if t and t.strip()).strip()
-
-
-def _dynamic_schema_block(tickers: List[str], today: str) -> str:
+def summarize_ticker_lines_from_headlines(
+    ticker: str,
+    company_name: str,
+    news_items: List[Dict[str, str]],
+    n_lines: int,
+    max_headlines_for_llm: int = 12,
+) -> str:
     """
-    MAG7 리스트가 일부만 켜져 있어도 스키마가 안 깨지게,
-    by_ticker를 '현재 tickers'로만 요구하도록 스키마 텍스트 생성.
+    Finviz에서 수집한 '헤드라인 목록'만으로 n_lines 줄 한글 요약 생성.
+    (원문 링크는 코드에서 별도로 출력)
     """
-    # 예시 티커 하나로 템플릿 만들고, 실제 요구는 tickers 전체로
-    exemplar = tickers[0] if tickers else "AAPL"
-    schema_lines = [
-        "{",
-        f'  "date_kst": "{today}",',
-        '  "universe": "Magnificent 7",',
-        '  "overall": {',
-        '    "key_takeaways": ["문장","문장","문장","문장","문장"],',
-        '    "market_mood": {',
-        '      "label": "긍정|중립|부정",',
-        '      "reason": "한 줄 이유"',
-        "    }",
-        "  },",
-        '  "by_ticker": {',
-    ]
-
-    # tickers 각각을 명시적으로 요구(모델이 빠뜨리는 것 방지)
-    for i, t in enumerate(tickers):
-        comma = "," if i < len(tickers) - 1 else ""
-        schema_lines += [
-            f'    "{t}": {{',
-            '      "themes": [',
-            '        {"theme":"AI","keywords":["키워드","키워드","키워드"]}',
-            "      ],",
-            f'      "headline_translations": ["한글 번역 (반드시 {t} H1~H{MAX_PER_TICKER}를 가능한 한 모두 포함)" ],',
-            '      "summary": {',
-            f'        "bullish": ["호재"(최대 {MAX_LINES}개)],',
-            f'        "bearish": ["악재"(최대 {MAX_LINES}개)],',
-            f'        "watchlist": ["관전 포인트"(최대 {MAX_LINES}개)]',
-            "      },",
-            '      "mood": "긍정|중립|부정"',
-            f"    }}{comma}",
-        ]
-
-    schema_lines += [
-        "  }",
-        "}",
-    ]
-    return "\n".join(schema_lines)
-
-def translate_headlines_to_korean(ticker: str, pairs: List[tuple]) -> List[str]:
-    """
-    pairs: [(id_str, english_title), ...]
-    return: ["한글번역 (TICKER H#)", ...]  (입력 순서 유지)
-    """
-    if not OPENAI_API_KEY or not pairs:
-        return []
-
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_API_KEY}"}
-
-    lines = "\n".join([f"{hid}: {title}" for hid, title in pairs])
-
-    prompt = f"""
-너는 금융 뉴스 번역가다.
-아래 영어 헤드라인을 한국어로 자연스럽게 번역해라.
-규칙:
-- 출력은 유효한 JSON만.
-- 각 항목은 정확히 "ko" 필드에 번역문, "id" 필드에 원본 ID를 포함.
-- 번역문에는 기업명/티커는 번역하지 말고 원문 표기를 유지해도 된다.
-- 과장/추측 금지, 의미를 바꾸지 말 것.
-
-입력:
-{lines}
-
-출력 스키마:
-{{"items":[{{"id":"{ticker} H1","ko":"번역문"}}]}}
-""".strip()
-
-    body = {
-        "model": OPENAI_MODEL,
-        "input": prompt,
-        "text": {"format": {"type": "json_object"}}
-    }
-
-    try:
-        r = requests.post(OPENAI_URL, headers=headers, json=body, timeout=45)
-        if r.status_code != 200:
-            return []
-        j = r.json()
-        out = _extract_output_text(j).strip()
-        obj = json.loads(out)
-        items = obj.get("items", [])
-        out_lines = []
-        for it in items:
-            if isinstance(it, dict):
-                ko = (it.get("ko") or "").strip()
-                hid = (it.get("id") or "").strip()
-                if ko:
-                    out_lines.append(f"{ko} ({hid})" if hid else ko)
-        return out_lines
-    except Exception:
-        return []
-
-
-def summarize_mag7_to_json(news_blob: Dict[str, Any], today: str) -> Optional[Dict[str, Any]]:
-    print("Analyzing with ChatGPT (OpenAI Responses API) - JSON output...")
+    if not news_items:
+        return "최근 24시간 내 Finviz 기사 없음"
 
     if not OPENAI_API_KEY:
-        print("❌ OPENAI_API_KEY missing")
-        return None
+        return "OPENAI_API_KEY 누락"
 
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
-    }
+    use = news_items[:max_headlines_for_llm]
 
-    # ---------------------------------------
-    # 1) Headline block with strict IDs
-    # ---------------------------------------
-    tickers = [c["ticker"] for c in MAG7]
+    headline_lines = []
+    for i, it in enumerate(use, start=1):
+        title = (it.get("title") or "").strip()
+        if title:
+            headline_lines.append(f"{ticker} N{i}: {title}")
+    headlines_text = "\n".join(headline_lines).strip()
+    if not headlines_text:
+        return "최근 24시간 내 Finviz 기사 없음"
 
-    compact_lines = []
-    for c in MAG7:
-        t = c["ticker"]
-        headlines = news_blob["items"].get(t, [])
-        for i, h in enumerate(headlines, start=1):
-            title = (h.get("title") or "").strip()
-            published = (h.get("published") or "").strip()
-            if not title:
-                continue
-            if published:
-                compact_lines.append(f"{t} H{i}: {title} [{published}]")
-            else:
-                compact_lines.append(f"{t} H{i}: {title}")
-
-    headlines_text = "\n".join(compact_lines).strip()
-
-    # ---------------------------------------
-    # 2) Dynamic JSON schema
-    # ---------------------------------------
-    schema_block = _dynamic_schema_block(tickers=tickers, today=today)
-    theme_list = ", ".join(THEMES)
-
-    # ---------------------------------------
-    # 3) Strict hallucination-proof prompt
-    # ---------------------------------------
     prompt = f"""
-너는 미국 주식 시장 뉴스 애널리스트다.
-아래는 Finviz에서 수집한 '최근 24시간 이내' 실제 헤드라인이다.
+Finviz에서 최근 24시간 내 {company_name}({ticker}) 관련 '헤드라인 목록'이 아래에 주어진다.
+너는 이 목록에 있는 내용만 사용해 요약해야 한다.
 
-⚠️ 이 데이터만이 유일한 정보원이다.
-⚠️ 아래에 없는 기사, 내용, 추측, 일반론, 배경지식은 절대 사용하지 마라.
+규칙:
+- 아래 목록에 없는 내용/배경지식/추측/일반론 절대 금지
+- 중복 헤드라인은 같은 사건이면 하나로 병합하여 요약
+- 정확히 {n_lines}줄로 한글 요약
+- 각 줄은 독립적인 한 문장
+- 번호/불릿/이모지/마크다운/JSON 금지 (줄바꿈만)
+- 회사·인물·기관명은 가능한 한 원문 표기를 유지해도 됨
 
-[헤드라인 데이터 — ID로만 참조할 것]
+[헤드라인 목록]
 {headlines_text}
 
-테마는 반드시 아래 목록 중에서만 선택해:
-[{theme_list}]
-
-반드시 아래 JSON 스키마를 100% 준수해.
-다른 텍스트, 설명, 마크다운, 코드블록은 절대 출력하지 마라.
-
-스키마:
-{schema_block}
-
-규칙 (위반 시 잘못된 출력으로 간주됨):
-- 각 티커에 헤드라인이 N개 있으면 headline_translations는 정확히 min(N, 5)개를 출력해라.
-- 가능한 경우 반드시 (H1, H2, H3, H4, H5) 순서대로 모두 번역해라.
-- headline_translations는 각 티커별로 가능한 한 많이 채워라: 해당 티커에 헤드라인이 N개 있으면 정확히 min(N, 5)개를 출력해라.
-- headline_translations는 반드시 (H1부터) 순서대로 사용해라. 즉, 가능한 경우 H1~H5를 모두 포함해라.
-- headline_translations는 반드시 위 [헤드라인 데이터]의 H1~H{MAX_PER_TICKER} 중에서만 선택해 번역할 것.
-- 각 번역에는 반드시 원본 ID를 포함할 것. 예: "테슬라 중국 판매 증가 (TSLA H2)"
-- 새로운 기사, 일반적 시장 문장, 과거 뉴스, 추측을 만들지 말 것.
-- 요약(bullish/bearish/watchlist)도 반드시 위 헤드라인에서 직접 추론 가능한 내용만 사용.
-- 헤드라인이 없는 티커는 모든 배열을 빈 배열 [] 로 두어라.
-- 전부 한국어로 작성.
-
-지금 바로 JSON만 출력하라.
+요약만 출력:
 """.strip()
 
-    # ---------------------------------------
-    # 4) OpenAI Responses API (JSON mode)
-    # ---------------------------------------
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_API_KEY}"}
     body = {
         "model": OPENAI_MODEL,
         "input": prompt,
-        "text": {
-            "format": {
-                "type": "json_object"
-            }
-        }
+        "text": {"format": {"type": "text"}},
     }
 
     try:
         r = requests.post(OPENAI_URL, headers=headers, json=body, timeout=75)
-    except requests.RequestException as e:
-        print(f"❌ OpenAI request failed: {e}")
-        return None
+        if r.status_code != 200:
+            return "요약 생성 실패"
 
-    if r.status_code != 200:
-        print(f"❌ OpenAI API error {r.status_code}: {r.text[:800]}")
-        return None
-
-    try:
         j = r.json()
+        txt = (_extract_output_text(j) or "").strip()
+        if not txt:
+            return "요약 생성 실패"
+
+        # 줄 수 보정: 많으면 자르고, 적으면 그대로(환각 방지)
+        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+        if len(lines) > n_lines:
+            lines = lines[:n_lines]
+        return "\n".join(lines) if lines else "요약 생성 실패"
+
     except Exception:
-        print("❌ OpenAI response not JSON (outer)")
-        return None
-
-    # ---------------------------------------
-    # 5) Extract & parse JSON-only output
-    # ---------------------------------------
-    out_text = _extract_output_text(j).strip()
-    if not out_text:
-        print("❌ Empty model output")
-        return None
-
-    try:
-        return json.loads(out_text)
-    except json.JSONDecodeError:
-        # tolerate stray text just in case
-        start = out_text.find("{")
-        end = out_text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                return json.loads(out_text[start:end + 1])
-            except Exception:
-                pass
-
-        print("❌ Failed to parse JSON from model output.")
-        print(out_text[:500])
-        return None
-
+        return "요약 생성 실패"
 
 
 # -------------------------------
-# 3) Render: JSON -> Card-style text (Telegram/PNG 공용)
-# -------------------------------
-def safe_list(x) -> List[Any]:
-    return x if isinstance(x, list) else []
-
-
-def safe_dict(x) -> Dict[str, Any]:
-    return x if isinstance(x, dict) else {}
-
-
-def render_mag7_cards(summary: Dict[str, Any], news_blob: Dict[str, Any]) -> str:
-    date_kst = (summary.get("date_kst") or "").strip()
-    overall = safe_dict(summary.get("overall"))
-    key_takeaways = safe_list(overall.get("key_takeaways"))
-    market_mood = safe_dict(overall.get("market_mood"))
-    overall_label = (market_mood.get("label") or "").strip()
-    overall_reason = (market_mood.get("reason") or "").strip()
-
-    lines: List[str] = []
-    lines.append("🧠 [미국주식 데일리 브리핑 (Finviz / 최근 24시간)]")
-    if date_kst:
-        lines.append(f"📅 {date_kst}")
-    lines.append("")
-
-    lines.append("📌 전체 핵심 요약")
-    for t in key_takeaways[:5]:
-        if isinstance(t, str) and t.strip():
-            lines.append(f"• {t.strip()}")
-    if overall_label:
-        lines.append(f"📊 전체 시장 분위기: {overall_label}" + (f" — {overall_reason}" if overall_reason else ""))
-    lines.append("\n---\n")
-
-    by_ticker = safe_dict(summary.get("by_ticker"))
-
-    for c in MAG7:
-        t = c["ticker"]
-        name = c["name"]
-        emoji = c["emoji"]
-
-        data = safe_dict(by_ticker.get(t))
-        mood = (data.get("mood") or "중립").strip()
-
-        themes = safe_list(data.get("themes"))
-        translations_raw = safe_list(data.get("headline_translations"))
-        summary_obj = safe_dict(data.get("summary"))
-        bullish = safe_list(summary_obj.get("bullish"))
-        bearish = safe_list(summary_obj.get("bearish"))
-        watchlist = safe_list(summary_obj.get("watchlist"))
-
-        # ✅ 원문(최대 5개) 확보
-        orig_items = news_blob.get("items", {}).get(t, []) or []
-        orig_titles = []
-        for h in orig_items:
-            title = (h.get("title") or "").strip()
-            if title:
-                orig_titles.append(title)
-        orig_titles = orig_titles[:MAX_PER_TICKER]
-
-        # ✅ headline_translations 정규화: (1) dict 형태 지원, (2) str 형태 지원
-        translations: List[str] = []
-        for x in translations_raw:
-            if isinstance(x, dict):
-                ko = (x.get("ko") or "").strip()
-                _id = (x.get("id") or "").strip()
-                if ko:
-                    translations.append(f"{ko} ({_id})" if _id else ko)
-            elif isinstance(x, str) and x.strip():
-                translations.append(x.strip())
-
-        # ✅ 부족분 보충: 번역이 5개 미만이면 원문으로 채워서 5개 보장 (중복 제거)
-        if len(translations) < MAX_PER_TICKER:
-            seen = set(translations)
-            for ot in orig_titles:
-                if len(translations) >= MAX_PER_TICKER:
-                    break
-                if ot not in seen:
-                    #===================
-                    # ✅ 부족분 보충: 번역이 5개 미만이면 "부족한 원문을 추가 번역"해서 5개 보장
-                    if len(translations) < MAX_PER_TICKER and orig_titles:
-                        need = MAX_PER_TICKER - len(translations)
-                    
-                        # 이미 번역된 ID(H#)가 있으면 그 번호는 제외(대충 포함 여부 체크)
-                        # translations 안에 "(TICKER H#)"가 들어온다는 가정
-                        used_ids = set()
-                        for tr in translations:
-                            if isinstance(tr, str) and f"({t} H" in tr:
-                                # 예: "... (TSLA H3)"
-                                start = tr.rfind(f"({t} H")
-                                if start != -1:
-                                    used_ids.add(tr[start+1:].split(")")[0].strip())  # "TSLA H3"
-                    
-                        # 부족분 대상: 원문에서 아직 안 쓴 것들(순서 유지)
-                        pairs = []
-                        for idx, ot in enumerate(orig_titles, start=1):
-                            hid = f"{t} H{idx}"
-                            if hid in used_ids:
-                                continue
-                            pairs.append((hid, ot))
-                            if len(pairs) >= need:
-                                break
-                    
-                        # 추가 번역 호출
-                        extra = translate_headlines_to_korean(t, pairs)
-                    
-                        # 혹시 번역 실패하면 원문으로라도 채움
-                        if extra:
-                            for x in extra:
-                                if len(translations) < MAX_PER_TICKER:
-                                    translations.append(x)
-                        else:
-                            for _, ot in pairs:
-                                if len(translations) < MAX_PER_TICKER:
-                                    translations.append(ot)
-                    #===================
-                    seen.add(ot)
-
-        # ✅ 그래도 없으면(해당 티커 뉴스 0개) 그냥 빈 배열 유지
-        translations = translations[:MAX_PER_TICKER]
-
-        # ----------------
-        # 출력 시작
-        # ----------------
-        lines.append(f"{emoji} {t} — {name}")
-        lines.append(f"시장 분위기: {mood}")
-
-        # theme tags
-        if themes:
-            themed_bits = []
-            for th in themes[:MAX_THEMES_PER_TICKER]:
-                thd = safe_dict(th)
-                theme_name = (thd.get("theme") or "").strip()
-                kws = [k.strip() for k in safe_list(thd.get("keywords"))[:KW_PER_THEME] if isinstance(k, str) and k.strip()]
-                if theme_name and kws:
-                    themed_bits.append(f"{theme_name}({', '.join(kws)})")
-                elif theme_name:
-                    themed_bits.append(theme_name)
-            if themed_bits:
-                lines.append("🏷️ 테마: " + " | ".join(themed_bits))
-
-        lines.append("")
-        if bullish:
-            lines.append("✅ 호재")
-            for x in bullish[:MAX_LINES]:
-                if isinstance(x, str) and x.strip():
-                    lines.append(f"• {x.strip()}")
-            lines.append("")
-        if bearish:
-            lines.append("⚠️ 악재")
-            for x in bearish[:MAX_LINES]:
-                if isinstance(x, str) and x.strip():
-                    lines.append(f"• {x.strip()}")
-            lines.append("")
-        if watchlist:
-            lines.append("👀 관전 포인트")
-            for x in watchlist[:MAX_LINES]:
-                if isinstance(x, str) and x.strip():
-                    lines.append(f"• {x.strip()}")
-            lines.append("")
-
-        # ✅ 헤드라인 출력: 5개 보장(가능한 경우)
-        if translations:
-            # 번역이 충분히 왔는지/원문으로 채워졌는지 구분해 라벨링하고 싶으면 아래 주석 해제
-            # label = "📰 주요 헤드라인(번역/보충 포함)"
-            label = "📰 주요 헤드라인"
-            lines.append(label)
-            for h in translations[:MAX_PER_TICKER]:
-                if isinstance(h, str) and h.strip():
-                    lines.append(f"• {h.strip()}")
-
-        lines.append("\n---\n")
-
-    return "\n".join(lines).strip()
-
-
-
-# -------------------------------
-# 4) Save PNG
-# -------------------------------
-def _load_font(size: int) -> ImageFont.ImageFont:
-    candidates = [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.otf",
-        "/usr/share/fonts/truetype/noto/NotoSansKR-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ]
-    for p in candidates:
-        try:
-            if os.path.exists(p):
-                return ImageFont.truetype(p, size=size)
-        except Exception:
-            continue
-
-    try:
-        return ImageFont.load_default()
-    except Exception:
-        # 최후의 최후: Pillow 내부 오류 방지
-        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size=size)
-
-
-
-def save_report_png(text: str, date_str: str) -> str:
-    """
-    card 텍스트를 PNG로 저장.
-    GitHub Actions 환경에서는 ~/Downloads가 없을 수 있어 cwd로 저장됨.
-    """
-    
-    downloads = os.path.join(os.path.expanduser("~"), "Downloads")
-    if not os.path.isdir(downloads):
-        downloads = os.getcwd()
-
-    out_path = os.path.join(downloads, f"{date_str}.png")
-
-    W = 1080
-    margin = 60
-    line_spacing = 10
-
-
-    try:
-        font_title = _load_font(42)
-        font_body = _load_font(30)
-    except Exception as e:
-        print("❌ font load failed:", e)
-        font_title = ImageFont.load_default()
-        font_body = ImageFont.load_default()
-
-    dummy = Image.new("RGB", (W, 100), "white")
-    d = ImageDraw.Draw(dummy)
-
-    def wrap_line(line: str, font: ImageFont.ImageFont, max_width: int) -> List[str]:
-        if not line.strip():
-            return [""]
-        chars = list(line)
-        out = []
-        cur = ""
-        for ch in chars:
-            test = cur + ch
-            try:
-                ok = d.textlength(test, font=font) <= max_width
-            except Exception:
-                # 일부 환경에서 이모지/폰트 문제 시 대략적인 fallback
-                ok = len(test) * (font.size * 0.6) <= max_width
-            if ok:
-                cur = test
-            else:
-                out.append(cur)
-                cur = ch
-        out.append(cur)
-        return out
-
-    max_text_width = W - 2 * margin
-    lines_raw = text.splitlines()
-
-    wrapped: List[tuple] = []
-    for i, ln in enumerate(lines_raw):
-        if i == 0:
-            for wln in wrap_line(ln, font_title, max_text_width):
-                wrapped.append(("title", wln))
-        else:
-            for wln in wrap_line(ln, font_body, max_text_width):
-                wrapped.append(("body", wln))
-
-    y = margin
-    for kind, ln in wrapped:
-        font = font_title if kind == "title" else font_body
-        bbox = d.textbbox((0, 0), ln, font=font)
-        h = (bbox[3] - bbox[1]) if bbox else (50 if kind == "title" else 36)
-        y += h + line_spacing
-    H = y + margin
-
-    img = Image.new("RGB", (W, H), (255, 255, 255))
-    draw = ImageDraw.Draw(img)
-
-    y = margin
-    for kind, ln in wrapped:
-        font = font_title if kind == "title" else font_body
-        draw.text((margin, y), ln, font=font, fill=(0, 0, 0))
-        bbox = draw.textbbox((margin, y), ln, font=font)
-        h = (bbox[3] - bbox[1]) if bbox else (50 if kind == "title" else 36)
-        y += h + line_spacing
-
-    img.save(out_path, "PNG")
-    return out_path
-
-
-# -------------------------------
-# 5) Telegram (chunked)
+# Telegram
 # -------------------------------
 def send_telegram_msg(message: str) -> bool:
     print("Sending Telegram...")
@@ -781,12 +280,12 @@ def send_telegram_msg(message: str) -> bool:
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    chunks = [message[i:i + TELEGRAM_CHUNK_SIZE] for i in range(0, len(message), TELEGRAM_CHUNK_SIZE)]
+    chunks = [message[i : i + TELEGRAM_CHUNK_SIZE] for i in range(0, len(message), TELEGRAM_CHUNK_SIZE)]
     for idx, chunk in enumerate(chunks, start=1):
-        payload = {"chat_id": CHAT_ID, "text": chunk, "disable_web_page_preview": True}
+        payload = {"chat_id": CHAT_ID, "text": chunk, "disable_web_page_preview": False}
         resp = requests.post(url, data=payload, timeout=20)
         if resp.status_code != 200:
-            print(f"❌ Telegram send failed (part {idx}/{len(chunks)}): {resp.text}")
+            print(f"❌ Telegram send failed (part {idx}/{len(chunks)}): {resp.text[:400]}")
             return False
 
     print("✅ Telegram sent")
@@ -794,9 +293,68 @@ def send_telegram_msg(message: str) -> bool:
 
 
 # -------------------------------
-# 6) Main
+# Report builder
 # -------------------------------
-def main():
+def build_report_text(today: str) -> str:
+    lines: List[str] = []
+    lines.append("🧠 [미국주식 데일리 브리핑 (Finviz / 최근 24시간)]")
+    lines.append(f"📅 {today}")
+    lines.append("")
+
+    for c in MAG7:
+        t = c["ticker"]
+        name = c["name"]
+        emoji = c["emoji"]
+
+        n_lines = 20 if t == "TSLA" else 10
+
+        try:
+            raw = fetch_finviz_news_with_links_24h(t, max_items=120)
+            time.sleep(FINVIZ_SLEEP_SEC)
+        except Exception as e:
+            lines.append(f"{emoji} {t} — {name}")
+            lines.append("Finviz 수집 실패")
+            lines.append(f"에러: {e}")
+            lines.append("\n---\n")
+            continue
+
+        deduped = dedupe_news(raw)
+
+        summary = summarize_ticker_lines_from_headlines(
+            ticker=t,
+            company_name=name,
+            news_items=deduped,
+            n_lines=n_lines,
+            max_headlines_for_llm=12,
+        )
+
+        lines.append(f"{emoji} {t} — {name}")
+        lines.append(summary)
+
+        # 원문 링크: 상위 5개
+        link_items: List[Tuple[str, str]] = []
+        for it in deduped[:5]:
+            title = (it.get("title") or "").strip()
+            url = (it.get("url") or "").strip()
+            if title and url:
+                link_items.append((title, url))
+
+        if link_items:
+            lines.append("")
+            lines.append("원문 링크")
+            for title, url in link_items:
+                lines.append(f"- {title}")
+                lines.append(f"  {url}")
+
+        lines.append("\n---\n")
+
+    return "\n".join(lines).strip()
+
+
+# -------------------------------
+# Main
+# -------------------------------
+def main() -> int:
     print("OpenAI key set?", bool(OPENAI_API_KEY))
     print("Token set?", bool(TELEGRAM_TOKEN), "ChatID set?", bool(CHAT_ID))
     print("OpenAI model:", OPENAI_MODEL)
@@ -804,43 +362,9 @@ def main():
     kst = pytz.timezone("Asia/Seoul")
     today = datetime.datetime.now(kst).strftime("%Y-%m-%d")
 
-    news_blob = get_mag7_news(per_ticker=MAX_PER_TICKER)
-    summary_json = summarize_mag7_to_json(news_blob, today=today)
-
-    if summary_json is None:
-        # fallback summary
-        summary_json = {
-            "date_kst": today,
-            "universe": "Magnificent 7",
-            "overall": {
-                "key_takeaways": [],
-                "market_mood": {"label": "중립", "reason": "요약 생성 실패"}
-            },
-            "by_ticker": {
-                t["ticker"]: {
-                    "themes": [],
-                    "headline_translations": [],
-                    "summary": {"bullish": [], "bearish": [], "watchlist": []},
-                    "mood": "중립"
-                } for t in MAG7
-            }
-        }
-
-    # 1) 카드 텍스트 생성
-    report_text = render_mag7_cards(summary_json, news_blob)
-
-    # 2) Telegram 전송
-    ok_tg = send_telegram_msg(report_text)
-
-    # 3) PNG 저장
-    try:
-        out_path = save_report_png(report_text, today)
-        print(f"✅ Saved PNG: {out_path}")
-    except Exception as e:
-        print(f"❌ PNG save failed: {e}")
-        out_path = ""
-
-    return 0 if ok_tg else 1
+    report_text = build_report_text(today)
+    ok = send_telegram_msg(report_text)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
