@@ -268,6 +268,27 @@ def dedupe_news(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
     return out
 
 
+def format_price_change_suffix(price: str, change: str) -> str:
+    """
+    예: price="393.67", change="-4.95%" -> " (393.67, 🔴 -4.95%)"
+    change가 "+0.18%"면 초록.
+    """
+    p = (price or "").strip()
+    c = (change or "").strip()
+
+    if not (p and c):
+        return ""
+
+    # change 부호로 상승/하락 판단
+    if c.startswith("-"):
+        dot = "🔴"
+    elif c.startswith("+"):
+        dot = "🟢"
+    else:
+        dot = "⚪"
+
+    return f" ({p}, {dot} {c})"
+
 # -------------------------------
 # Summarization: 10 lines (+ TSLA 20) from Finviz headlines only
 # -------------------------------
