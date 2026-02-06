@@ -414,7 +414,7 @@ def build_report_text(today: str) -> str:
         deduped, earnings_mode = filter_earnings_only_if_earnings_day(deduped_all)
     
         # 5) 기사 수가 적으면 5줄, 아니면 기본(TSLA 20 / others 10)
-        n_lines = decide_summary_lines(t, n_headlines=len(deduped))
+        #n_lines = decide_summary_lines(t, n_headlines=len(deduped))
     
         # 6) 요약
         summary = summarize_ticker_lines_from_headlines(
