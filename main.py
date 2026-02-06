@@ -384,51 +384,51 @@ def build_report_text(today: str) -> str:
     lines.append("")
 
     for c in MAG7:
-    t = c["ticker"]
-    name = c["name"]
-    emoji = c["emoji"]
-
-    # 1) 주가 / 변동률
-    price, chg = fetch_finviz_price_change(t)
-    time.sleep(FINVIZ_SLEEP_SEC)
-    suffix = f" ({price}, {chg})" if (price and chg) else ""
-
-    # 2) Finviz 뉴스 수집
-    try:
-        raw = fetch_finviz_news_with_links_24h(t, max_items=120)
+        t = c["ticker"]
+        name = c["name"]
+        emoji = c["emoji"]
+    
+        # 1) 주가 / 변동률
+        price, chg = fetch_finviz_price_change(t)
         time.sleep(FINVIZ_SLEEP_SEC)
-    except Exception as e:
+        suffix = f" ({price}, {chg})" if (price and chg) else ""
+    
+        # 2) Finviz 뉴스 수집
+        try:
+            raw = fetch_finviz_news_with_links_24h(t, max_items=120)
+            time.sleep(FINVIZ_SLEEP_SEC)
+        except Exception as e:
+            lines.append(f"{emoji} {t} — {name}{suffix}")
+            lines.append("Finviz 수집 실패")
+            lines.append(f"에러: {e}")
+            lines.append("\n---\n")
+            continue
+    
+        # 3) 중복 제거 (여기서 deduped_all이 반드시 정의됨)
+        deduped_all = dedupe_news(raw)
+    
+        # (선택) 티커/회사명 필터를 쓰고 있다면 여기서 적용
+        # deduped_all = filter_headlines_for_ticker(deduped_all, t, name)
+    
+        # 4) 실적 모드: 실적 헤드라인이 있으면 실적 관련만 남김
+        deduped, earnings_mode = filter_earnings_only_if_earnings_day(deduped_all)
+    
+        # 5) 기사 수가 적으면 5줄, 아니면 기본(TSLA 20 / others 10)
+        n_lines = decide_summary_lines(t, n_headlines=len(deduped))
+    
+        # 6) 요약
+        summary = summarize_ticker_lines_from_headlines(
+            ticker=t,
+            company_name=name,
+            news_items=deduped,
+            n_lines=n_lines,
+            max_headlines_for_llm=12,
+        )
+    
+        # 7) 출력
         lines.append(f"{emoji} {t} — {name}{suffix}")
-        lines.append("Finviz 수집 실패")
-        lines.append(f"에러: {e}")
+        lines.append(summary)
         lines.append("\n---\n")
-        continue
-
-    # 3) 중복 제거 (여기서 deduped_all이 반드시 정의됨)
-    deduped_all = dedupe_news(raw)
-
-    # (선택) 티커/회사명 필터를 쓰고 있다면 여기서 적용
-    # deduped_all = filter_headlines_for_ticker(deduped_all, t, name)
-
-    # 4) 실적 모드: 실적 헤드라인이 있으면 실적 관련만 남김
-    deduped, earnings_mode = filter_earnings_only_if_earnings_day(deduped_all)
-
-    # 5) 기사 수가 적으면 5줄, 아니면 기본(TSLA 20 / others 10)
-    n_lines = decide_summary_lines(t, n_headlines=len(deduped))
-
-    # 6) 요약
-    summary = summarize_ticker_lines_from_headlines(
-        ticker=t,
-        company_name=name,
-        news_items=deduped,
-        n_lines=n_lines,
-        max_headlines_for_llm=12,
-    )
-
-    # 7) 출력
-    lines.append(f"{emoji} {t} — {name}{suffix}")
-    lines.append(summary)
-    lines.append("\n---\n")
 
     return "\n".join(lines).strip()
 
