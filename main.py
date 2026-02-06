@@ -177,6 +177,46 @@ def fetch_finviz_news_with_links_24h(ticker: str, max_items: int = 120) -> List[
 
     return items
 
+def fetch_finviz_price_change(ticker: str) -> Tuple[str, str]:
+    """
+    Finviz quote 페이지에서 Price / Change(%)를 파싱.
+    반환: (price_str, change_str). 실패 시 ("", "")
+    """
+    url = f"https://finviz.com/quote.ashx?t={quote(ticker)}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+    }
+
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+
+        table = soup.find("table", class_="snapshot-table2")
+        if not table:
+            return "", ""
+
+        tds = [td.get_text(" ", strip=True) for td in table.find_all("td")]
+        # snapshot-table2는 보통 [Label, Value, Label, Value, ...] 형태
+        fields = {}
+        for i in range(0, len(tds) - 1, 2):
+            label = tds[i]
+            value = tds[i + 1]
+            if label and value:
+                fields[label] = value
+
+        price = (fields.get("Price") or "").strip()
+        change = (fields.get("Change") or "").strip()
+
+        # Change가 "+1.23%" 형태로 오므로 그대로 사용
+        return price, change
+
+    except Exception:
+        return "", ""
+
 
 def dedupe_news(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """
@@ -328,7 +368,11 @@ def build_report_text(today: str) -> str:
             max_headlines_for_llm=12,
         )
 
-        lines.append(f"{emoji} {t} — {name}")
+        price, chg = fetch_finviz_price_change(t)
+        time.sleep(FINVIZ_SLEEP_SEC)  # Finviz 요청 1번 더 하니까 딜레이 유지
+        
+        suffix = f" ({price}, {chg})" if (price and chg) else ""
+        lines.append(f"{emoji} {t} — {name}{suffix}")
         lines.append(summary)
 
         # 원문 링크: 상위 5개
