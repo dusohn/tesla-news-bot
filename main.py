@@ -282,10 +282,10 @@ def format_price_change_suffix(price: str, change: str) -> str:
     # change 부호로 상승/하락 판단
     if c.startswith("-"):
         dot = "🔴"
-    elif c.startswith("+"):
-        dot = "🟢"
     else:
-        dot = "⚪"
+        dot = "🟢"
+    #else:
+    #    dot = "⚪"
 
     return f" ({p}, {dot} {c})"
 
