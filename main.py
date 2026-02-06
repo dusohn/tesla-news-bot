@@ -422,22 +422,6 @@ def build_report_text(today: str) -> str:
         suffix = f" ({price}, {chg})" if (price and chg) else ""
         lines.append(f"{emoji} {t} — {name}{suffix}")
         lines.append(summary)
-"""
-        # 원문 링크: 상위 5개
-        link_items: List[Tuple[str, str]] = []
-        for it in deduped[:5]:
-            title = (it.get("title") or "").strip()
-            url = (it.get("url") or "").strip()
-            if title and url:
-                link_items.append((title, url))
-
-        if link_items:
-            lines.append("")
-            lines.append("원문 링크")
-            for title, url in link_items:
-                lines.append(f"- {title}")
-                lines.append(f"  {url}")
-"""
         lines.append("\n---\n")
 
     return "\n".join(lines).strip()
