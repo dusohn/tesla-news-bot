@@ -38,6 +38,41 @@ MAG7 = [
 ]
 
 
+EARNINGS_KEYWORDS = [
+    # 실적/발표/가이던스/컨퍼런스콜
+    "earnings", "results", "reports", "reported", "q1", "q2", "q3", "q4",
+    "quarter", "fiscal", "fy", "guidance", "outlook", "forecast",
+    "eps", "revenue", "sales", "profit", "margin",
+    "beat", "miss", "tops", "falls short",
+    "conference call", "call transcript",
+    "preliminary results", "financial results",
+    "estimates", "consensus",
+]
+
+def is_earnings_headline(title: str) -> bool:
+    t = (title or "").lower()
+    return any(k in t for k in EARNINGS_KEYWORDS)
+
+def filter_earnings_only_if_earnings_day(items: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], bool]:
+    """
+    최근 24시간 목록에 '실적/earnings' 시그널이 하나라도 있으면
+    해당 티커는 '실적 관련 기사만' 남긴다.
+    반환: (filtered_items, earnings_mode_enabled)
+    """
+    if not items:
+        return items, False
+
+    has_earnings = any(is_earnings_headline(it.get("title", "")) for it in items)
+    if not has_earnings:
+        return items, False
+
+    filtered = [it for it in items if is_earnings_headline(it.get("title", ""))]
+    # 만약 너무 빡세게 걸러서 0개가 되면 원본 유지(안전장치)
+    if not filtered:
+        return items, False
+
+    return filtered, True
+
 # -------------------------------
 # OpenAI Responses API helpers
 # -------------------------------
@@ -367,6 +402,12 @@ def build_report_text(today: str) -> str:
 
         deduped = dedupe_news(raw)
 
+        # (선택) 이전에 넣었던 "티커/회사명 1차 필터"를 쓰고 있다면 여기서 적용
+        # deduped_all = filter_headlines_for_ticker(deduped_all, t, name)
+        
+        # 실적 모드: 실적 헤드라인이 있으면 실적 관련만 남김
+        deduped, earnings_mode = filter_earnings_only_if_earnings_day(deduped_all)
+        
         summary = summarize_ticker_lines_from_headlines(
             ticker=t,
             company_name=name,
@@ -381,7 +422,7 @@ def build_report_text(today: str) -> str:
         suffix = f" ({price}, {chg})" if (price and chg) else ""
         lines.append(f"{emoji} {t} — {name}{suffix}")
         lines.append(summary)
-
+"""
         # 원문 링크: 상위 5개
         link_items: List[Tuple[str, str]] = []
         for it in deduped[:5]:
@@ -396,7 +437,7 @@ def build_report_text(today: str) -> str:
             for title, url in link_items:
                 lines.append(f"- {title}")
                 lines.append(f"  {url}")
-
+"""
         lines.append("\n---\n")
 
     return "\n".join(lines).strip()
