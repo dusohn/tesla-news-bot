@@ -399,7 +399,7 @@ def build_report_text(today: str) -> str:
         # 1) 주가 / 변동률
         price, chg = fetch_finviz_price_change(t)
         time.sleep(FINVIZ_SLEEP_SEC)
-        suffix = f" ({price}, {chg})" if (price and chg) else ""
+        suffix = format_price_change_suffix(price, chg)
     
         # 2) Finviz 뉴스 수집
         try:
