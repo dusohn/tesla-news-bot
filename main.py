@@ -49,6 +49,12 @@ EARNINGS_KEYWORDS = [
     "estimates", "consensus",
 ]
 
+
+def debug_chat_id():
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    r = requests.get(url, timeout=20)
+    print(r.json())
+
 def is_earnings_headline(title: str) -> bool:
     t = (title or "").lower()
     return any(k in t for k in EARNINGS_KEYWORDS)
@@ -466,6 +472,8 @@ def build_report_text(today: str) -> str:
 # Main
 # -------------------------------
 def main() -> int:
+    debug_chat_id()
+    
     print("OpenAI key set?", bool(OPENAI_API_KEY))
     print("Token set?", bool(TELEGRAM_TOKEN), "ChatID set?", bool(CHAT_ID))
     print("OpenAI model:", OPENAI_MODEL)
