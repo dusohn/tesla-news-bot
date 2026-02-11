@@ -344,6 +344,8 @@ def summarize_ticker_lines_from_headlines(
 - 각 줄은 한 문장
 - 번호/불릿/이모지/마크다운/JSON 사용 금지
 - 추측, 평가, 전망, 일반론 금지
+- 헤드라인에 없는 고유명사/수치/날짜/원인을 새로 만들어내지 말 것
+- 관련 내용이 부족하면 부족하다고 그대로 쓰고, 억지로 채우지 말 것
 
 [헤드라인 목록]
 {headlines_text}
@@ -446,7 +448,7 @@ def build_report_text(today: str) -> str:
         # deduped_all = filter_headlines_for_ticker(deduped_all, t, name)
     
         # 4) 실적 모드: 실적 헤드라인이 있으면 실적 관련만 남김
-        deduped, earnings_mode = filter_earnings_only_if_earnings_day(deduped_all)
+        #deduped, earnings_mode = filter_earnings_only_if_earnings_day(deduped_all)
     
         # 5) 기사 수가 적으면 5줄, 아니면 기본(TSLA 20 / others 10)
         n_lines = decide_summary_lines(t, n_headlines=len(deduped))
