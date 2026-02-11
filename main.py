@@ -449,6 +449,8 @@ def build_report_text(today: str) -> str:
     
         # 4) 실적 모드: 실적 헤드라인이 있으면 실적 관련만 남김
         #deduped, earnings_mode = filter_earnings_only_if_earnings_day(deduped_all)
+        deduped = deduped_all
+        earnings_mode = False
     
         # 5) 기사 수가 적으면 5줄, 아니면 기본(TSLA 20 / others 10)
         n_lines = decide_summary_lines(t, n_headlines=len(deduped))
