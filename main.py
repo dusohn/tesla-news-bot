@@ -19,9 +19,9 @@ from bs4 import BeautifulSoup
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 SMTP_HOST = (os.environ.get("SMTP_HOST") or "smtp.gmail.com").strip()
 SMTP_PORT = int((os.environ.get("SMTP_PORT") or "587").strip())
-SMTP_USERNAME = (os.environ.get("SMTP_USERNAME") or "").strip()
+SMTP_USER = (os.environ.get("SMTP_USER") or "").strip()
 SMTP_PASSWORD = (os.environ.get("SMTP_PASSWORD") or "").strip()
-EMAIL_FROM = (os.environ.get("EMAIL_FROM") or SMTP_USERNAME).strip()
+EMAIL_FROM = (os.environ.get("EMAIL_FROM") or SMTP_USER).strip()
 EMAIL_TO = (os.environ.get("EMAIL_TO") or "dusohn@gmail.com").strip()
 
 OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
@@ -379,8 +379,8 @@ def summarize_ticker_lines_from_headlines(
 # -------------------------------
 def send_email_msg(message: str, subject: str) -> bool:
     print("Sending email...")
-    if not SMTP_USERNAME or not SMTP_PASSWORD or not EMAIL_FROM or not EMAIL_TO:
-        print("Email env vars missing: SMTP_USERNAME/SMTP_PASSWORD/EMAIL_FROM/EMAIL_TO")
+    if not SMTP_USER or not SMTP_PASSWORD or not EMAIL_FROM or not EMAIL_TO:
+        print("Email env vars missing: SMTP_USER/SMTP_PASSWORD/EMAIL_FROM/EMAIL_TO")
         return False
 
     msg = MIMEText(message, "plain", "utf-8")
@@ -393,7 +393,7 @@ def send_email_msg(message: str, subject: str) -> bool:
             smtp.ehlo()
             smtp.starttls()
             smtp.ehlo()
-            smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
             smtp.send_message(msg)
     except Exception as e:
         print(f"Email send failed: {e}")
@@ -477,7 +477,7 @@ def build_report_text(today: str) -> str:
 # -------------------------------
 def main() -> int:
     print("OpenAI key set?", bool(OPENAI_API_KEY))
-    print("SMTP user set?", bool(SMTP_USERNAME), "Email to:", EMAIL_TO)
+    print("SMTP user set?", bool(SMTP_USER), "Email to:", EMAIL_TO)
     print("OpenAI model:", OPENAI_MODEL)
 
     kst = pytz.timezone("Asia/Seoul")
