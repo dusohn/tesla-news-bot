@@ -5,6 +5,7 @@ import json
 import time
 import datetime
 import smtplib
+import html
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
@@ -524,7 +525,16 @@ def send_email_msg(message: str, subject: str) -> bool:
         print("Email env vars missing: SMTP_USER/SMTP_PASSWORD/EMAIL_FROM/EMAIL_TO")
         return False
 
-    msg = MIMEText(message, "plain", "utf-8")
+    escaped_message = html.escape(message).replace("\n", "<br>\n")
+    html_body = f"""\
+<!doctype html>
+<html>
+  <body style="font-family: Arial, 'Noto Sans CJK KR', sans-serif; font-size: 11.5pt; line-height: 1.45;">
+    {escaped_message}
+  </body>
+</html>
+"""
+    msg = MIMEText(html_body, "html", "utf-8")
     msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
