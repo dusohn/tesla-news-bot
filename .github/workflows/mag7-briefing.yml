@@ -1,9 +1,9 @@
-name: MAG7 Daily Briefing (Telegram + PNG)
+name: MAG7 Daily Briefing (Email + PNG)
 
 on:
   workflow_dispatch:
   schedule:
-    # 매일 KST 08:30 = UTC 23:30 (전날)
+    # 매일 KST 07:00 = UTC 22:00 (전날)
     - cron: "00 22 * * *"
     # - cron: "30 10 * * *"
 
@@ -40,16 +40,27 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      - name: Check email env
+        run: |
+          echo "OPENAI_API_KEY set: ${{ secrets.OPENAI_API_KEY != '' }}"
+          echo "SMTP_USER set: ${{ secrets.SMTP_USER != '' }}"
+          echo "SMTP_PASSWORD set: ${{ secrets.SMTP_PASSWORD != '' }}"
+          echo "EMAIL_FROM set: ${{ secrets.EMAIL_FROM != '' }}"
+
       - name: Run bot
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          OPENAI_MODEL: gpt-4o-mini
+          OPENAI_MODEL: gpt-5.5
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: 587
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: dusohn@gmail.com
         run: |
           python main.py
 
-      # ✅ 생성된 PNG를 아티팩트로 업로드 (파일명이 날짜여도 *.png로 잡힘)
+      # 생성된 PNG를 아티팩트로 업로드 (파일명이 날짜여도 *.png로 잡힘)
       - name: Upload report PNG
         if: always()
         uses: actions/upload-artifact@v4
