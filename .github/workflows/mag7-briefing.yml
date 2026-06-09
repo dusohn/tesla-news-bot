@@ -59,13 +59,3 @@ jobs:
           EMAIL_TO: dusohn@gmail.com
         run: |
           python main.py
-
-      # 생성된 PNG를 아티팩트로 업로드 (파일명이 날짜여도 *.png로 잡힘)
-      - name: Upload report PNG
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mag7-report
-          path: "*.png"
-          if-no-files-found: warn
-          retention-days: 14
