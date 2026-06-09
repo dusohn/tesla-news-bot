@@ -5,9 +5,11 @@ import json
 import time
 import datetime
 import smtplib
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from email.mime.text import MIMEText
 from typing import Dict, List, Any, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 import requests
 import pytz
@@ -24,18 +26,25 @@ SMTP_PASSWORD = (os.environ.get("SMTP_PASSWORD") or "").strip()
 EMAIL_FROM = (os.environ.get("EMAIL_FROM") or SMTP_USER).strip()
 EMAIL_TO = (os.environ.get("EMAIL_TO") or "dusohn@gmail.com").strip()
 
-OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
+OPENAI_MODEL = (os.environ.get("OPENAI_MODEL") or "gpt-5.5").strip()
 OPENAI_URL = "https://api.openai.com/v1/responses"
 
 # Finviz anti-bot softening
 FINVIZ_SLEEP_SEC = 1.0
+NEWS_SLEEP_SEC = 0.35
+MAX_ARTICLES_PER_TICKER = 20
+ARTICLE_CHAR_LIMIT = int((os.environ.get("ARTICLE_CHAR_LIMIT") or "5000").strip())
+LLM_INPUT_CHAR_LIMIT = int((os.environ.get("LLM_INPUT_CHAR_LIMIT") or "70000").strip())
+
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    )
+}
 
 MAG7 = [
-    {"name": "Apple", "ticker": "AAPL", "emoji": "Apple"},
-    {"name": "Microsoft", "ticker": "MSFT", "emoji": "Microsoft"},
-    {"name": "Amazon", "ticker": "AMZN", "emoji": "Amazon"},
     {"name": "Alphabet", "ticker": "GOOGL", "emoji": "Alphabet"},
-    {"name": "Meta", "ticker": "META", "emoji": "Meta"},
     {"name": "NVIDIA", "ticker": "NVDA", "emoji": "NVIDIA"},
     {"name": "Tesla", "ticker": "TSLA", "emoji": "Tesla"},
 ]
@@ -154,14 +163,8 @@ def fetch_finviz_news_with_links_24h(ticker: str, max_items: int = 120) -> List[
     최근 24시간(KST 기준) 항목만 반환한다.
     """
     url = f"https://finviz.com/quote.ashx?t={quote(ticker)}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-        )
-    }
 
-    r = requests.get(url, headers=headers, timeout=20)
+    r = requests.get(url, headers=REQUEST_HEADERS, timeout=20)
     r.raise_for_status()
 
     soup = BeautifulSoup(r.text, "lxml")
@@ -187,7 +190,7 @@ def fetch_finviz_news_with_links_24h(ticker: str, max_items: int = 120) -> List[
         raw_dt = tds[0].get_text(" ", strip=True)  # "Feb-03-26 08:35AM" or "08:12AM"
         a = tds[1].find("a")
         title = a.get_text(" ", strip=True) if a else tds[1].get_text(" ", strip=True)
-        link = (a.get("href", "").strip() if a else "")
+        link = urljoin("https://finviz.com/", a.get("href", "").strip()) if a else ""
 
         if not title:
             continue
@@ -208,6 +211,59 @@ def fetch_finviz_news_with_links_24h(ticker: str, max_items: int = 120) -> List[
                 "url": link,
                 "published": raw_dt,
                 "published_kst": dt_kst.isoformat(),
+                "source": "Finviz",
+            }
+        )
+
+        if len(items) >= max_items:
+            break
+
+    return items
+
+
+def fetch_yahoo_finance_news_24h(ticker: str, max_items: int = 80) -> List[Dict[str, str]]:
+    """
+    Yahoo Finance RSS에서 최근 24시간(KST 기준) 뉴스 title/url/published를 수집한다.
+    """
+    rss_url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={quote(ticker)}&region=US&lang=en-US"
+    r = requests.get(rss_url, headers=REQUEST_HEADERS, timeout=20)
+    r.raise_for_status()
+
+    kst = pytz.timezone("Asia/Seoul")
+    now_kst = datetime.datetime.now(kst)
+    cutoff_kst = now_kst - datetime.timedelta(hours=24)
+
+    root = ET.fromstring(r.content)
+    channel = root.find("channel")
+    if channel is None:
+        return []
+
+    items: List[Dict[str, str]] = []
+    for item in channel.findall("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        if not title or not link:
+            continue
+
+        try:
+            dt = parsedate_to_datetime(pub_date)
+            if dt.tzinfo is None:
+                dt = pytz.utc.localize(dt)
+            dt_kst = dt.astimezone(kst)
+        except Exception:
+            continue
+
+        if dt_kst < cutoff_kst:
+            continue
+
+        items.append(
+            {
+                "title": title,
+                "url": link,
+                "published": pub_date,
+                "published_kst": dt_kst.isoformat(),
+                "source": "Yahoo Finance",
             }
         )
 
@@ -222,15 +278,9 @@ def fetch_finviz_price_change(ticker: str) -> Tuple[str, str]:
     반환: (price_str, change_str). 실패 시 ("", "")
     """
     url = f"https://finviz.com/quote.ashx?t={quote(ticker)}"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-        )
-    }
 
     try:
-        r = requests.get(url, headers=headers, timeout=20)
+        r = requests.get(url, headers=REQUEST_HEADERS, timeout=20)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "lxml")
 
@@ -259,16 +309,93 @@ def fetch_finviz_price_change(ticker: str) -> Tuple[str, str]:
 
 def dedupe_news(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """
-    제목 기반 중복 병합.
+    제목과 URL 기반 중복 병합.
     """
     out: List[Dict[str, str]] = []
     seen = set()
     for it in items:
-        key = _norm_title(it.get("title", ""))
+        url_key = (it.get("url") or "").split("?")[0].rstrip("/")
+        title_key = _norm_title(it.get("title", ""))
+        key = url_key or title_key
         if not key or key in seen:
             continue
         seen.add(key)
         out.append(it)
+    return out
+
+
+def _clean_article_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    text = re.sub(r"Advertisement\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"Sign in to access.*", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def fetch_article_text(url: str) -> str:
+    """
+    기사 URL에서 본문 문단을 추출한다. 접근이 막히거나 본문이 짧으면 빈 문자열을 반환한다.
+    """
+    if not url:
+        return ""
+
+    try:
+        r = requests.get(url, headers=REQUEST_HEADERS, timeout=25, allow_redirects=True)
+        r.raise_for_status()
+    except Exception:
+        return ""
+
+    soup = BeautifulSoup(r.text, "lxml")
+    for tag in soup(["script", "style", "noscript", "svg", "form", "nav", "footer", "header"]):
+        tag.decompose()
+
+    article = soup.find("article")
+    containers = [article] if article else []
+    containers.extend(
+        soup.select(
+            "[data-test-locator='articleBody'], [data-testid='article-body'], "
+            ".caas-body, .article-body, .story-body, main"
+        )
+    )
+
+    paragraphs: List[str] = []
+    seen = set()
+    for container in containers:
+        if not container:
+            continue
+        for p in container.find_all(["p", "li"]):
+            txt = _clean_article_text(p.get_text(" ", strip=True))
+            if len(txt) < 40 or txt in seen:
+                continue
+            seen.add(txt)
+            paragraphs.append(txt)
+
+    if not paragraphs:
+        for p in soup.find_all("p"):
+            txt = _clean_article_text(p.get_text(" ", strip=True))
+            if len(txt) < 60 or txt in seen:
+                continue
+            seen.add(txt)
+            paragraphs.append(txt)
+
+    text = "\n".join(paragraphs).strip()
+    if len(text) < 250:
+        return ""
+    return text[:ARTICLE_CHAR_LIMIT]
+
+
+def attach_article_texts(items: List[Dict[str, str]], max_articles: int = MAX_ARTICLES_PER_TICKER) -> List[Dict[str, str]]:
+    """
+    기사 목록의 각 URL을 열어 본문을 붙인다.
+    """
+    out: List[Dict[str, str]] = []
+    for item in items[:max_articles]:
+        text = fetch_article_text(item.get("url", ""))
+        if not text:
+            continue
+        enriched = dict(item)
+        enriched["text"] = text
+        out.append(enriched)
+        time.sleep(NEWS_SLEEP_SEC)
     return out
 
 
@@ -292,57 +419,71 @@ def format_price_change_suffix(price: str, change: str) -> str:
     return f" ({p}, {dot} {c})"
 
 # -------------------------------
-# Summarization: 10 lines (+ TSLA 20) from Finviz headlines only
+# Summarization: 10 lines (+ TSLA 20) from article contents
 # -------------------------------
-def summarize_ticker_lines_from_headlines(
+def summarize_ticker_lines_from_articles(
     ticker: str,
     company_name: str,
-    news_items: List[Dict[str, str]],
+    articles: List[Dict[str, str]],
     n_lines: int,
-    max_headlines_for_llm: int = 12,
 ) -> str:
     """
-    Finviz에서 수집한 헤드라인 목록만으로 n_lines 줄의 요약을 생성한다.
-    원문 링크는 코드에서 별도로 출력할 수 있다.
+    Finviz와 Yahoo Finance에서 수집한 기사 본문으로 n_lines줄 이내 요약을 생성한다.
     """
-    if not news_items:
-        return "최근 24시간 내 Finviz 기사 없음"
+    if not articles:
+        return ""
 
     if not OPENAI_API_KEY:
         return "OPENAI_API_KEY 누락"
 
-    use = news_items[:max_headlines_for_llm]
-
-    headline_lines = []
-    for i, it in enumerate(use, start=1):
+    article_blocks = []
+    total_len = 0
+    for i, it in enumerate(articles, start=1):
         title = (it.get("title") or "").strip()
-        if title:
-            headline_lines.append(f"{ticker} N{i}: {title}")
-    headlines_text = "\n".join(headline_lines).strip()
-    if not headlines_text:
-        return "최근 24시간 내 Finviz 기사 없음"
+        source = (it.get("source") or "").strip()
+        published = (it.get("published_kst") or it.get("published") or "").strip()
+        url = (it.get("url") or "").strip()
+        text = (it.get("text") or "").strip()
+        if not text:
+            continue
+        block = (
+            f"[Article {i}]\n"
+            f"Source: {source}\n"
+            f"Published KST: {published}\n"
+            f"Title: {title}\n"
+            f"URL: {url}\n"
+            f"Body:\n{text}"
+        )
+        if total_len + len(block) > LLM_INPUT_CHAR_LIMIT:
+            break
+        article_blocks.append(block)
+        total_len += len(block)
+
+    articles_text = "\n\n".join(article_blocks).strip()
+    if not articles_text:
+        return ""
 
     prompt = f"""
-아래는 Finviz에서 수집한 최근 24시간 이내 뉴스 헤드라인 목록이다.
+아래는 Finviz와 Yahoo Finance에서 수집한 최근 24시간 이내 기사 본문이다.
 
 매우 중요:
 - 요약은 오직 {company_name}({ticker})와 직접 관련된 내용만 포함해야 한다.
-- 다른 기업, 시장 전체, 정치, 거시경제 관련 내용은 헤드라인에 포함되어 있어도 제외한다.
+- 다른 기업, 시장 전체, 정치, 거시경제 관련 내용은 기사 본문에 포함되어 있어도 제외한다.
 - {company_name}({ticker})의 실적, 제품, 전략, 주가, 규제, 사업과 직접 관련된 정보만 요약한다.
 
 규칙:
-- 아래 헤드라인 목록에 있는 내용만 사용한다.
-- {company_name}({ticker})와 직접 관련 없는 헤드라인은 무시한다.
+- 아래 기사 본문에 있는 내용만 사용한다.
+- {company_name}({ticker})와 직접 관련 없는 내용은 무시한다.
 - 중복되는 사건은 하나로 병합한다.
-- 정확히 {n_lines}줄로 한국어 요약을 작성한다.
+- 최대 {n_lines}줄로 한국어 요약을 작성한다.
 - 각 줄은 한 문장으로 작성한다.
 - 번호, 불릿, 이모지, 마크다운, JSON은 사용하지 않는다.
 - 추측, 평가, 전망, 일반론은 금지한다.
-- 헤드라인에 없는 고유명사, 수치, 날짜, 원인은 새로 만들지 않는다.
-- 관련 내용이 부족하면 부족하다고 그대로 적고, 억지로 채우지 않는다.
+- 기사 본문에 없는 고유명사, 수치, 날짜, 원인은 새로 만들지 않는다.
+- 내용이 적으면 적은 만큼만 출력하고, 부족하다는 말은 쓰지 않는다.
 
-[헤드라인 목록]
-{headlines_text}
+[기사 본문]
+{articles_text}
 
 요약만 출력:
 """.strip()
@@ -368,7 +509,7 @@ def summarize_ticker_lines_from_headlines(
         lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
         if len(lines) > n_lines:
             lines = lines[:n_lines]
-        return "\n".join(lines) if lines else "요약 생성 실패"
+        return "\n".join(lines)
 
     except Exception:
         return "요약 생성 실패"
@@ -416,7 +557,7 @@ def decide_summary_lines(ticker: str, n_headlines: int) -> int:
 # -------------------------------
 def build_report_text(today: str) -> str:
     lines: List[str] = []
-    lines.append("[미국주식 데일리 브리핑 (Finviz / 최근 24시간)]")
+    lines.append("[미국주식 데일리 브리핑 (Finviz + Yahoo Finance / 최근 24시간 / 기사 본문 기반)]")
     lines.append(f"날짜: {today}")
     lines.append("")
 
@@ -430,16 +571,20 @@ def build_report_text(today: str) -> str:
         time.sleep(FINVIZ_SLEEP_SEC)
         suffix = format_price_change_suffix(price, chg)
     
-        # 2) Finviz 뉴스 수집
+        # 2) Finviz + Yahoo Finance 뉴스 수집
+        raw: List[Dict[str, str]] = []
+        errors: List[str] = []
         try:
-            raw = fetch_finviz_news_with_links_24h(t, max_items=120)
+            raw.extend(fetch_finviz_news_with_links_24h(t, max_items=80))
             time.sleep(FINVIZ_SLEEP_SEC)
         except Exception as e:
-            lines.append(f"{emoji} {t} - {name}{suffix}")
-            lines.append("Finviz 수집 실패")
-            lines.append(f"에러: {e}")
-            lines.append("\n---\n")
-            continue
+            errors.append(f"Finviz 수집 실패: {e}")
+
+        try:
+            raw.extend(fetch_yahoo_finance_news_24h(t, max_items=80))
+            time.sleep(NEWS_SLEEP_SEC)
+        except Exception as e:
+            errors.append(f"Yahoo Finance 수집 실패: {e}")
 
         # 3) 중복 제거
         deduped_all = dedupe_news(raw)
@@ -452,21 +597,26 @@ def build_report_text(today: str) -> str:
         deduped = deduped_all
         earnings_mode = False
 
-        # 5) 기사 수가 적으면 5줄, 아니면 기본(TSLA 20 / others 10)
-        n_lines = decide_summary_lines(t, n_headlines=len(deduped))
+        # 5) 각 기사 URL에서 본문 수집
+        articles = attach_article_texts(deduped, max_articles=MAX_ARTICLES_PER_TICKER)
 
-        # 6) 요약
-        summary = summarize_ticker_lines_from_headlines(
+        # 6) 기사 수가 적으면 5줄, 아니면 기본(TSLA 20 / others 10)
+        n_lines = decide_summary_lines(t, n_headlines=len(articles))
+
+        # 7) 요약
+        summary = summarize_ticker_lines_from_articles(
             ticker=t,
             company_name=name,
-            news_items=deduped,
+            articles=articles,
             n_lines=n_lines,
-            max_headlines_for_llm=12,
         )
     
-        # 7) 출력
+        # 8) 출력
         lines.append(f"{emoji} {t} - {name}{suffix}")
-        lines.append(summary)
+        if summary:
+            lines.append(summary)
+        if errors and not articles:
+            lines.extend(errors)
         lines.append("\n---\n")
 
     return "\n".join(lines).strip()
